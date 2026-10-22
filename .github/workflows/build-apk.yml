@@ -1,4 +1,4 @@
-name: Compilar FreeMyTV
+name: Compilar FreeMyTV con recomendaciones
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Descargar el codigo del repositorio
+      - name: Descargar el codigo
         uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -22,6 +22,27 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Restaurar y comprobar la firma original
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FREEMYTV_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Falta el secreto FREEMYTV_KEYSTORE_BASE64."
+            exit 1
+          fi
+
+          printf '%s' "$KEYSTORE_BASE64" \
+            | base64 --decode > freemytv.keystore
+
+          keytool -list \
+            -keystore freemytv.keystore \
+            -storepass freemytv \
+            -alias freemytv > /dev/null
 
       - name: Preparar Android SDK 34
         shell: bash
@@ -33,9 +54,8 @@ jobs:
 
           mkdir -p "$SDK"
 
-          # Aceptar las licencias del SDK para esta compilacion.
           set +o pipefail
-          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null
           set -o pipefail
 
           "$SDKMANAGER" --sdk_root="$SDK" \
@@ -45,40 +65,83 @@ jobs:
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: Crear configuracion para Peru y Surco
+      - name: Configurar TMDB y ubicacion
+        shell: bash
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          WATCHMODE_API_KEY: ${{ secrets.WATCHMODE_API_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          tmdb = os.environ.get("TMDB_API_KEY", "").strip()
+          watchmode = os.environ.get("WATCHMODE_API_KEY", "").strip()
+
+          if not tmdb:
+              raise SystemExit("Falta el secreto TMDB_API_KEY.")
+
+          # Evitar caracteres incompatibles con config.properties
+          # y con las cadenas Java generadas por build.sh.
+          for name, value in (
+              ("TMDB_API_KEY", tmdb),
+              ("WATCHMODE_API_KEY", watchmode),
+          ):
+              if any(c.isspace() for c in value) or any(
+                  c in value for c in ('"', '\\', "'")
+              ):
+                  raise SystemExit(
+                      f"{name}: pega solo la credencial, sin comillas ni espacios."
+                  )
+
+          settings = {
+              "tmdb_key": tmdb,
+              "watchmode_key": watchmode,
+              "tmdb_region": "PE",
+              "latitude": "-12.1464",
+              "longitude": "-76.9919",
+              "city": "Surco, Lima",
+              "language": "auto",
+              "currency": "PEN",
+              "temperature": "C",
+              "disable_assistant": "false",
+              "show_crypto": "false",
+              "hide_animation": "false",
+          }
+
+          Path("config.properties").write_text(
+              "".join(f"{key}={value}\n" for key, value in settings.items()),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Compilar con la firma original
         shell: bash
         run: |
-          cat > config.properties <<'EOF'
-          tmdb_key=
-          watchmode_key=
-          tmdb_region=PE
-          latitude=-12.1464
-          longitude=-76.9919
-          city=Surco, Lima
-          language=auto
-          currency=PEN
-          temperature=C
-          disable_assistant=false
-          show_crypto=false
-          hide_animation=false
-          EOF
+          set -euo pipefail
+          test -s freemytv.keystore
+          bash ./build.sh
 
-      - name: Compilar APK
+      - name: Verificar la firma del APK
         shell: bash
-        run: bash ./build.sh
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" \
+            verify FreeMyTV.apk
 
-      - name: Guardar APK descargable
+      - name: Guardar APK para descargar
         uses: actions/upload-artifact@v4
         with:
-          name: FreeMyTV-APK
+          name: FreeMyTV-Peru-TMDB
           path: FreeMyTV.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
-      - name: Guardar respaldo de la clave de firma
-        uses: actions/upload-artifact@v4
-        with:
-          name: FreeMyTV-clave-GUARDAR
-          path: freemytv.keystore
-          if-no-files-found: error
-          retention-days: 7
+      - name: Limpiar archivos sensibles del entorno
+        if: always()
+        shell: bash
+        run: |
+          rm -f freemytv.keystore config.properties FreeMyTV.apk
+          rm -rf out
