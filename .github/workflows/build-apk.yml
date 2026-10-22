@@ -1,0 +1,84 @@
+name: Compilar FreeMyTV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Descargar el codigo del repositorio
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Preparar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Preparar Android SDK 34
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          SDK="$RUNNER_TEMP/freemytv-sdk"
+
+          mkdir -p "$SDK"
+
+          # Aceptar las licencias del SDK para esta compilacion.
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null
+          set -o pipefail
+
+          "$SDKMANAGER" --sdk_root="$SDK" \
+            "build-tools;34.0.0" \
+            "platforms;android-34"
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Crear configuracion para Peru y Surco
+        shell: bash
+        run: |
+          cat > config.properties <<'EOF'
+          tmdb_key=
+          watchmode_key=
+          tmdb_region=PE
+          latitude=-12.1464
+          longitude=-76.9919
+          city=Surco, Lima
+          language=auto
+          currency=PEN
+          temperature=C
+          disable_assistant=false
+          show_crypto=false
+          hide_animation=false
+          EOF
+
+      - name: Compilar APK
+        shell: bash
+        run: bash ./build.sh
+
+      - name: Guardar APK descargable
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeMyTV-APK
+          path: FreeMyTV.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Guardar respaldo de la clave de firma
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeMyTV-clave-GUARDAR
+          path: freemytv.keystore
+          if-no-files-found: error
+          retention-days: 7
