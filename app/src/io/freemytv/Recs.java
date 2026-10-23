@@ -115,7 +115,9 @@ final class Recs {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Listener> listeners = new ArrayList<>();
-    private final Map<String, Backdrop> images = new LinkedHashMap<>();   // this hour's, built and ready to draw
+    // Orden de uso: conserva preferentemente las imágenes consultadas
+    // recientemente, no simplemente las últimas que se insertaron.
+    private final Map<String, Backdrop> images = new LinkedHashMap<>(16, 0.75f, true);
     private final java.util.Set<String> pending = new java.util.HashSet<>();
     private volatile List<Pick> picks = new ArrayList<>();
     private volatile int period = -1;
@@ -207,25 +209,30 @@ final class Recs {
         boolean sameKind = kind == null
                 ? selected == null
                 : kind.equals(selected);
+        return pageAt(kind, sameKind ? windowOffset : 0);
+    }
 
-        int offset = sameKind ? windowOffset : 0;
+    /**
+     * Grupo de hasta tres títulos.
+     * El último grupo se completa con los últimos tres disponibles.
+     * Ejemplo con ocho: 1-3, 4-6, 6-8.
+     */
+    List<Pick> pageAt(String kind, int offset) {
         List<Pick> list = ordered(kind);
         List<Pick> out = new ArrayList<>();
 
         if (list.isEmpty()) return out;
 
-        // Si la lista se redujo, utilizar un grupo válido.
-        if (offset >= list.size()) {
-            offset = ((list.size() - 1) / 3) * 3;
-        }
+        int start = Math.min(
+                Math.max(0, offset),
+                Math.max(0, list.size() - 3));
 
-        int end = Math.min(offset + 3, list.size());
-        for (int i = offset; i < end; i++) {
+        int end = Math.min(start + 3, list.size());
+        for (int i = start; i < end; i++) {
             out.add(list.get(i));
         }
         return out;
     }
-
     /**
      * Lista navegable: conserva la rotación horaria original y
      * elimina franquicias repetidas, pero ya no corta a tres títulos.
