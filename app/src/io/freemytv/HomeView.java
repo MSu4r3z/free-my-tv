@@ -137,6 +137,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the three cards
     private int tab, topIndex, cardIndex;
+    private int recommendationOffset;
     private int widgetIndex;    // with TalkBack on, the drawer's weather (0) or quotes (1) card can take the focus
     private List<Recs.Pick> cards = new ArrayList<>();
     private final Spring[] topFocus = new Spring[6];
@@ -384,6 +385,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         makeLightButtons();
         recs.setLight(true);
+        recs.setWindow(TAB_KIND[tab], 0);
         checkNight(false);
         sheetLayer.setVisibility(INVISIBLE);
         scene.setMotion(0.6f, 0f);
@@ -460,9 +462,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             pickIndex = 0;
             updatePicks();
         }
-        if (tab != 0) selectTab(0);
-        retarget(!animated);
-        motionDirty = true;
+        if (tab != 0) {
+            selectTab(0);
+        } else if (recommendationOffset != 0) {
+            recommendationOffset = 0;
+            cardIndex = 0;
+            recs.setWindow(TAB_KIND[tab], 0);
+            updatePicks();
+        }
     }
 
     /** The three corner buttons, with their names in the current language. */
@@ -2616,28 +2623,85 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /** The three cards of the current tab (Explore, Movies, Shows) and the background taken from the first one. */
-    private void updateCards() {
-        List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
-        if (!samePicks(list, cards)) {
-            cards = list;
-            cardIndex = Math.min(cardIndex, Math.max(0, list.size() - 1));
-            if (zone == Z_CARDS && list.isEmpty()) {
-                zone = Z_SHELF;
-                retarget(false);
-            }
-        }
-        for (Recs.Pick p : recs.wanted()) recs.backdrop(p);   // all three tabs preloaded: switching tabs is instant
-        Backdrop b = cards.isEmpty() ? null : recs.backdrop(cards.get(0));
-        if (cards.isEmpty() || b != null) showBackdrop(b);
-        heroDirty = true;
-        spoken.focusMoved();    // new picks under the focused card
+   private void updateCards() {
+    int total = recs.available(TAB_KIND[tab]);
+
+    if (total == 0) {
+        recommendationOffset = 0;
+    } else if (recommendationOffset >= total) {
+        recommendationOffset = ((total - 1) / 3) * 3;
     }
 
-    private void selectTab(int index) {
-        if (index == tab) return;
-        tab = index;
-        updateCards();
-        heroDirty = true;
+    recs.setWindow(TAB_KIND[tab], recommendationOffset);
+
+    List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
+    boolean changed = !samePicks(list, cards);
+    cards = list;
+
+    cardIndex = Math.min(cardIndex, Math.max(0, cards.size() - 1));
+
+    if (zone == Z_CARDS && cards.isEmpty()) {
+        zone = Z_SHELF;
+    }
+
+    // Solicitar imágenes solo de las tarjetas visibles.
+    // No precargar aquí las imágenes de las otras pestañas.
+    for (Recs.Pick p : cards) {
+        recs.backdrop(p);
+    }
+
+    Backdrop b = cards.isEmpty() ? null : recs.backdrop(cards.get(0));
+    if (cards.isEmpty() || b != null) {
+        showBackdrop(b);
+    }
+
+    if (changed) {
+        retarget(false);
+    }
+
+    heroDirty = true;
+    spoken.focusMoved();
+    }
+   private void selectTab(int index) {
+    if (index == tab) return;
+
+    tab = index;
+    recommendationOffset = 0;
+    cardIndex = 0;
+
+    recs.setWindow(TAB_KIND[tab], 0);
+    updateCards();
+    recs.refreshIfStale();
+    heroDirty = true;
+}
+
+/** Avanza o retrocede un grupo de tres recomendaciones. */
+private boolean changeRecommendationPage(int direction) {
+    int total = recs.available(TAB_KIND[tab]);
+    int next = recommendationOffset + direction * 3;
+
+    if (next < 0 || next >= total) return false;
+
+    recommendationOffset = next;
+    recs.setWindow(TAB_KIND[tab], next);
+
+    List<Recs.Pick> nextCards = recs.now(TAB_KIND[tab]);
+    cardIndex = direction > 0
+            ? 0
+            : Math.max(0, nextCards.size() - 1);
+
+    // Retirar la selección visual del grupo anterior.
+    for (Spring focus : cardFocus) {
+        focus.snap(0);
+    }
+
+    updateCards();
+
+    // El código existente carga los detalles que falten
+    // para la nueva ventana, sin bloquear el mando.
+    recs.refreshIfStale();
+    heroDirty = true;
+    return true;
     }
 
     /**
@@ -2859,11 +2923,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     cardIndex = nearest(cardRects, cards.size(), shelf.isEmpty() ? w / 2f : tileRects[shelfIndex].centerX());
                 }
                 break;
-            case Z_CARDS:
+           case Z_CARDS:
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(cards.size() - 1, cardIndex + dx));
-                    if (next == cardIndex) return true;
-                    cardIndex = next;
+                    int next = cardIndex + dx;
+
+                    if (next < 0 || next >= cards.size()) {
+                        if (!changeRecommendationPage(dx)) return true;
+                    } else {
+                        cardIndex = next;
+                    }
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
