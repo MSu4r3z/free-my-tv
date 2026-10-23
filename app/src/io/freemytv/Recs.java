@@ -181,99 +181,100 @@ final class Recs {
         return hour >= 5 && hour < 12 ? MANHA : hour >= 12 && hour < 18 ? TARDE : NOITE;
     }
 
-    /** This hour's picks (the first is the featured one; the arrows switch to the others). */
+   // Ventana que está mostrando la pantalla de inicio.
+    // Las otras pestañas conservan su primer grupo.
+    private volatile String windowKind;
+    private volatile int windowOffset;
+
+    void setWindow(String kind, int offset) {
+        windowKind = kind;
+        windowOffset = Math.max(0, offset);
+    }
+
+    /** Cantidad de recomendaciones navegables de una pestaña. */
+    int available(String kind) {
+        return ordered(kind).size();
+    }
+
+    /** Recomendaciones de la ventana de Explorar. */
     List<Pick> now() {
         return now(null);
     }
 
-    /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
+    /** Hasta tres tarjetas de la ventana actual de cada pestaña. */
     List<Pick> now(String kind) {
-     // Ventana que está mostrando la pantalla de inicio.
-// Las otras pestañas conservan su primer grupo.
-private volatile String windowKind;
-private volatile int windowOffset;
+        String selected = windowKind;
+        boolean sameKind = kind == null
+                ? selected == null
+                : kind.equals(selected);
 
-void setWindow(String kind, int offset) {
-    windowKind = kind;
-    windowOffset = Math.max(0, offset);
-}
+        int offset = sameKind ? windowOffset : 0;
+        List<Pick> list = ordered(kind);
+        List<Pick> out = new ArrayList<>();
 
-/** Cantidad de recomendaciones navegables de una pestaña. */
-int available(String kind) {
-    return ordered(kind).size();
-}
+        if (list.isEmpty()) return out;
 
-/** Hasta tres tarjetas de la ventana actual. */
-List<Pick> now(String kind) {
-    String selected = windowKind;
-    boolean sameKind = kind == null
-            ? selected == null
-            : kind.equals(selected);
+        // Si la lista se redujo, utilizar un grupo válido.
+        if (offset >= list.size()) {
+            offset = ((list.size() - 1) / 3) * 3;
+        }
 
-    int offset = sameKind ? windowOffset : 0;
-    List<Pick> list = ordered(kind);
-    List<Pick> out = new ArrayList<>();
-
-    if (list.isEmpty()) return out;
-
-    // Si la lista se redujo, volver a un grupo válido.
-    if (offset >= list.size()) {
-        offset = ((list.size() - 1) / 3) * 3;
+        int end = Math.min(offset + 3, list.size());
+        for (int i = offset; i < end; i++) {
+            out.add(list.get(i));
+        }
+        return out;
     }
 
-    int end = Math.min(offset + 3, list.size());
-    for (int i = offset; i < end; i++) {
-        out.add(list.get(i));
-    }
-    return out;
-}
+    /**
+     * Lista navegable: conserva la rotación horaria original y
+     * elimina franquicias repetidas, pero ya no corta a tres títulos.
+     */
+    private List<Pick> ordered(String kind) {
+        List<Pick> eligible = new ArrayList<>();
+        if (!hasKey(context)) return eligible;
 
-/**
- * Lista navegable: conserva la rotación horaria original y
- * elimina franquicias repetidas, pero ya no corta a tres títulos.
- */
-private List<Pick> ordered(String kind) {
-    List<Pick> eligible = new ArrayList<>();
-    if (!hasKey(context)) return eligible;
+        Map<String, Boolean> have = new HashMap<>();
 
-    Map<String, Boolean> have = new HashMap<>();
+        for (Pick p : picks) {
+            if (kind != null && !kind.equals(p.kind)) continue;
 
-    for (Pick p : picks) {
-        if (kind != null && !kind.equals(p.kind)) continue;
+            if (p.detailed) {
+                if (p.pkg == null) continue;
 
-        if (p.detailed) {
-            if (p.pkg == null) continue;
-            Boolean present = have.get(p.pkg);
-            if (present == null) {
-                present = installed(p.pkg);
-                have.put(p.pkg, present);
+                Boolean present = have.get(p.pkg);
+                if (present == null) {
+                    present = installed(p.pkg);
+                    have.put(p.pkg, present);
+                }
+                if (!present) continue;
             }
-            if (!present) continue;
+
+            eligible.add(p);
         }
 
-        eligible.add(p);
-    }
+        List<Pick> result = new ArrayList<>();
+        if (eligible.isEmpty()) return result;
 
-    List<Pick> result = new ArrayList<>();
-    if (eligible.isEmpty()) return result;
+        long hour = System.currentTimeMillis() / 3600_000L;
+        int start = (int) Math.floorMod(
+                hour * 3, (long) eligible.size());
+        Set<String> seen = new HashSet<>();
 
-    long hour = System.currentTimeMillis() / 3600_000L;
-    int start = (int) Math.floorMod(hour * 3, (long) eligible.size());
-    Set<String> seen = new HashSet<>();
-
-    for (int i = 0; i < eligible.size(); i++) {
-        Pick p = eligible.get((start + i) % eligible.size());
-        if (seen.add(franchise(p.title))) {
-            result.add(p);
+        for (int i = 0; i < eligible.size(); i++) {
+            Pick p = eligible.get((start + i) % eligible.size());
+            if (seen.add(franchise(p.title))) {
+                result.add(p);
+            }
         }
+        return result;
     }
-    return result;
-    }
- }
 
-    /** "Law & Order: Special Victims Unit" → "law & order" (what comes before ":" or " - "). */
+    /** Agrupa títulos por el texto anterior a ":" o " - ". */
     private static String franchise(String title) {
-        String t = title == null ? "" : title.toLowerCase(Locale.ROOT);
+        String t = title == null
+                ? ""
+                : title.toLowerCase(Locale.ROOT);
         int cut = t.indexOf(':');
         if (cut < 0) cut = t.indexOf(" - ");
         return (cut > 0 ? t.substring(0, cut) : t).trim();
