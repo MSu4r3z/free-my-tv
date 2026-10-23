@@ -8,7 +8,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- After the TV boots (and after a TV update), checks that Free My TV mode is still as you left it. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
+    <uses-permission android:name="com.android.providers.tv.permission.READ_EPG_DATA" />
+    <uses-permission android:name="android.permission.READ_TV_LISTINGS" />
     <!-- Android 11+: without this list the app can't "see" the other apps (getLeanbackLaunchIntentForPackage
          returns null). The shelf and streaming apps, the live TV apps and, through the <intent>, every TV app
          (for "All Apps"). -->
@@ -56,6 +57,12 @@
         android:usesCleartextTraffic="false">
 
         <!-- The app's icon opens the settings (switch between Free My TV and the original home screen). -->
+        <activity
+            android:name=".TvDataDiagnosticActivity"
+            android:exported="true"
+            android:label="Diagnóstico de contenido"
+            android:screenOrientation="landscape"
+            android:theme="@style/FreeMyTV.Home" />
         <activity
             android:name=".SettingsActivity"
             android:process=":home"
