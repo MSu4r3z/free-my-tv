@@ -188,24 +188,88 @@ final class Recs {
 
     /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
     List<Pick> now(String kind) {
-        List<Pick> list = new ArrayList<>();
-        if (!hasKey(context)) return list;    // no TMDB key: no recommendations
-        Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
-        for (Pick p : picks) {
-            if ((kind == null || kind.equals(p.kind))
-                    && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
-        }
-        if (list.isEmpty()) return list;
-        long hour = System.currentTimeMillis() / 3600_000L;
-        // Three per hour, never two from the same franchise ("Law & Order" and "Law & Order: Special…").
-        List<Pick> out = new ArrayList<>();
-        java.util.Set<String> seen = new java.util.HashSet<>();
-        for (int i = 0; i < list.size() && out.size() < 3; i++) {
-            Pick p = list.get((int) ((hour * 3 + i) % list.size()));
-            if (seen.add(franchise(p.title))) out.add(p);
-        }
-        return out;
+     // Ventana que está mostrando la pantalla de inicio.
+// Las otras pestañas conservan su primer grupo.
+private volatile String windowKind;
+private volatile int windowOffset;
+
+void setWindow(String kind, int offset) {
+    windowKind = kind;
+    windowOffset = Math.max(0, offset);
+}
+
+/** Cantidad de recomendaciones navegables de una pestaña. */
+int available(String kind) {
+    return ordered(kind).size();
+}
+
+/** Hasta tres tarjetas de la ventana actual. */
+List<Pick> now(String kind) {
+    String selected = windowKind;
+    boolean sameKind = kind == null
+            ? selected == null
+            : kind.equals(selected);
+
+    int offset = sameKind ? windowOffset : 0;
+    List<Pick> list = ordered(kind);
+    List<Pick> out = new ArrayList<>();
+
+    if (list.isEmpty()) return out;
+
+    // Si la lista se redujo, volver a un grupo válido.
+    if (offset >= list.size()) {
+        offset = ((list.size() - 1) / 3) * 3;
     }
+
+    int end = Math.min(offset + 3, list.size());
+    for (int i = offset; i < end; i++) {
+        out.add(list.get(i));
+    }
+    return out;
+}
+
+/**
+ * Lista navegable: conserva la rotación horaria original y
+ * elimina franquicias repetidas, pero ya no corta a tres títulos.
+ */
+private List<Pick> ordered(String kind) {
+    List<Pick> eligible = new ArrayList<>();
+    if (!hasKey(context)) return eligible;
+
+    Map<String, Boolean> have = new HashMap<>();
+
+    for (Pick p : picks) {
+        if (kind != null && !kind.equals(p.kind)) continue;
+
+        if (p.detailed) {
+            if (p.pkg == null) continue;
+            Boolean present = have.get(p.pkg);
+            if (present == null) {
+                present = installed(p.pkg);
+                have.put(p.pkg, present);
+            }
+            if (!present) continue;
+        }
+
+        eligible.add(p);
+    }
+
+    List<Pick> result = new ArrayList<>();
+    if (eligible.isEmpty()) return result;
+
+    long hour = System.currentTimeMillis() / 3600_000L;
+    int start = (int) Math.floorMod(hour * 3, (long) eligible.size());
+    Set<String> seen = new HashSet<>();
+
+    for (int i = 0; i < eligible.size(); i++) {
+        Pick p = eligible.get((start + i) % eligible.size());
+        if (seen.add(franchise(p.title))) {
+            result.add(p);
+        }
+    }
+    return result;
+    }
+ }
 
     /** "Law & Order: Special Victims Unit" → "law & order" (what comes before ":" or " - "). */
     private static String franchise(String title) {
