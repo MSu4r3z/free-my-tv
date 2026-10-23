@@ -91,7 +91,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final ExecutorService LOADER = Executors.newSingleThreadExecutor();
     // Light design (the L_ constants): title, tab bar, three recommendation cards and the shelf.
     // The tab bar is a 68 px capsule; the cards sit on the 5-column grid (the wide one spans 3).
-    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 442;
+    private static final float L_TITLE_BASE = 130, L_TABBAR_TOP = 158, L_TABBAR_H = 68, L_CARDS_TOP = 262, L_CARD_H = 410;
     private static final float L_TALL_W = 320, L_CARD_GAP = 40, L_BUTTON = 68, L_BUTTON_GAP = 20, L_BUTTON_CY = 103;
     private static final float L_PLATTER_TOP = 814, L_TILE_H = 126;
     private static final float L_DATE_BASE = 330, L_CLOCK_BASE = 540, L_WEATHER_BASE = 626, L_QUOTES_BASE = 694;
@@ -144,6 +144,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private final RectF[] topRects = new RectF[6];
     private final Spring[] cardFocus = new Spring[3];
     private final RectF[] cardRects = new RectF[3];
+    private final RecommendationMotion recommendationMotion = new RecommendationMotion();
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
     private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip, lDate, lClock, lWeather, lClockQuote;
     private Shader lightGradient;
@@ -446,6 +447,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Starting state (Home pressed while the home screen is showing): first app focused, drawer and sheet closed. */
     void reset(boolean animated) {
         wake();
+        recommendationMotion.cancelPage();
         cancelReorder(!animated);
         zone = Z_SHELF;
         shelfIndex = 0;
@@ -655,6 +657,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean heroFading = tickHeroFade(up);
         boolean bgFading = tickBackgroundFade(up);
         boolean nightMoving = tickNight(up);
+        heroMoving |= recommendationMotion.step(up);
 
         if (drawerMoving || sheetMoving || motionDirty) updateMotion();
         // Opening and closing the drawer only moves the cached layers: redrawing the glass on every frame made the TV
@@ -1714,6 +1717,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (snap) heroFocus.snap(heroFocus.target);
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
+        recommendationMotion.focus(snap);
         statusChanged |= topChanged;
         tilesDirty |= snap || tilesChanged;
         statusDirty |= snap || statusChanged;
@@ -2142,6 +2146,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void activate() {
         wake();
+        if (!sheetOpen && zone == Z_CARDS
+                && recommendationMotion.paging()) {
+            return;
+        }
         if (reordering) {   // TalkBack's click while moving an app: drop it
             dropReorder();
             return;
@@ -2449,6 +2457,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             case Z_CARDS:
                 if (i >= Math.min(3, cards.size())) return false;
                 a11yRect.set(cardRects[i]);
+                a11yRect.offset(
+                        recommendationMotion.incomingOffset(), 0);
                 dy = heroLayer.getTranslationY();
                 break;
             case Z_SHELF:
@@ -2619,89 +2629,33 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         cardRects[0].set(left, top, left + wide, top + ch);
         cardRects[1].set(cardRects[0].right + g, top, cardRects[0].right + g + tall, top + ch);
         cardRects[2].set(cardRects[1].right + g, top, cardRects[1].right + g + tall, top + ch);
+        recommendationMotion.layout(true);
         heroDirty = statusDirty = true;
     }
 
-    /** The three cards of the current tab (Explore, Movies, Shows) and the background taken from the first one. */
-   private void updateCards() {
-    int total = recs.available(TAB_KIND[tab]);
+/** Actualiza las tarjetas sin descartar sus imágenes visibles. */
+    private void updateCards() {
+        recommendationMotion.update();
+    }
 
-    if (total == 0) {
+    private void selectTab(int index) {
+        if (index == tab) return;
+
+        recommendationMotion.cancelPage();
+        tab = index;
         recommendationOffset = 0;
-    } else if (recommendationOffset >= total) {
-        recommendationOffset = ((total - 1) / 3) * 3;
+        cardIndex = 0;
+
+        recs.setWindow(TAB_KIND[tab], 0);
+        updateCards();
+        recommendationMotion.layout(true);
+        recs.refreshIfStale();
+        heroDirty = true;
     }
 
-    recs.setWindow(TAB_KIND[tab], recommendationOffset);
-
-    List<Recs.Pick> list = recs.now(TAB_KIND[tab]);
-    boolean changed = !samePicks(list, cards);
-    cards = list;
-
-    cardIndex = Math.min(cardIndex, Math.max(0, cards.size() - 1));
-
-    if (zone == Z_CARDS && cards.isEmpty()) {
-        zone = Z_SHELF;
-    }
-
-    // Solicitar imágenes solo de las tarjetas visibles.
-    // No precargar aquí las imágenes de las otras pestañas.
-    for (Recs.Pick p : cards) {
-        recs.backdrop(p);
-    }
-
-    Backdrop b = cards.isEmpty() ? null : recs.backdrop(cards.get(0));
-    if (cards.isEmpty() || b != null) {
-        showBackdrop(b);
-    }
-
-    if (changed) {
-        retarget(false);
-    }
-
-    heroDirty = true;
-    spoken.focusMoved();
-    }
-   private void selectTab(int index) {
-    if (index == tab) return;
-
-    tab = index;
-    recommendationOffset = 0;
-    cardIndex = 0;
-
-    recs.setWindow(TAB_KIND[tab], 0);
-    updateCards();
-    recs.refreshIfStale();
-    heroDirty = true;
-}
-
-/** Avanza o retrocede un grupo de tres recomendaciones. */
-private boolean changeRecommendationPage(int direction) {
-    int total = recs.available(TAB_KIND[tab]);
-    int next = recommendationOffset + direction * 3;
-
-    if (next < 0 || next >= total) return false;
-
-    recommendationOffset = next;
-    recs.setWindow(TAB_KIND[tab], next);
-
-    List<Recs.Pick> nextCards = recs.now(TAB_KIND[tab]);
-    cardIndex = direction > 0
-            ? 0
-            : Math.max(0, nextCards.size() - 1);
-
-    // Retirar la selección visual del grupo anterior.
-    for (Spring focus : cardFocus) {
-        focus.snap(0);
-    }
-
-    updateCards();
-
-    // El código existente carga los detalles que falten
-    // para la nueva ventana, sin bloquear el mando.
-    recs.refreshIfStale();
-    heroDirty = true;
-    return true;
+    /** Avanza o retrocede un grupo con desplazamiento horizontal. */
+    private boolean changeRecommendationPage(int direction) {
+        return recommendationMotion.changePage(direction);
     }
 
     /**
@@ -2776,10 +2730,7 @@ private boolean changeRecommendationPage(int direction) {
             if (i == tab) lTabOn.setColor(blend(tone(L_INK, WHITE), L_INK, focus));   // always dark on the white pill
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
-        int top = -1;
-        for (int i = 0; i < 3; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
-        for (int i = 0; i < 3; i++) if (i != top) drawLightCard(c, i);
-        if (top >= 0) drawLightCard(c, top);
+        recommendationMotion.draw(c);
         if (HomeData.coinCount() > 0) drawQuotes(c);
     }
 
@@ -2911,6 +2862,9 @@ private boolean changeRecommendationPage(int direction) {
     }
 
     private boolean moveLight(int dx, int dy) {
+        if (zone == Z_CARDS && recommendationMotion.paging()) {
+            return true;
+        }
         switch (zone) {
             case Z_SHELF:
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
@@ -2977,7 +2931,485 @@ private boolean changeRecommendationPage(int direction) {
         }
         return best;
     }
+    /**
+     * Carrusel común a Explorar, Películas y Series.
+     * Mantiene las imágenes visibles y anima geometría y paginación.
+     */
+    private final class RecommendationMotion {
+        private static final long FOCUS_DURATION = 200;
+        private static final long PAGE_DURATION = 240;
 
+        private final float[] weight = {1, 0, 0};
+        private final float[] fromWeight = {1, 0, 0};
+        private int selected = -1;
+        private long focusAt;
+
+        private Backdrop[] art = new Backdrop[3];
+
+        private List<Recs.Pick> outgoing = new ArrayList<>();
+        private Backdrop[] outgoingArt = new Backdrop[3];
+        private final RectF[] outgoingRects = {
+                new RectF(), new RectF(), new RectF()
+        };
+        private final float[] outgoingWeight = new float[3];
+        private final float[] outgoingFocus = new float[3];
+
+        private long pageAt;
+        private int direction;
+        private int total;
+
+        private final Paint decoration =
+                new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint photo =
+                new Paint(Paint.ANTI_ALIAS_FLAG
+                        | Paint.FILTER_BITMAP_FLAG);
+        private final Path photoClip = new Path();
+        private final Rect source = new Rect();
+
+        boolean paging() {
+            return pageAt != 0;
+        }
+
+        int pages() {
+            return (total + 2) / 3;
+        }
+
+        int page() {
+            return pages() == 0
+                    ? 0
+                    : Math.min(recommendationOffset / 3, pages() - 1);
+        }
+
+        private float ease(long start, long duration, long now) {
+            float t = Ui.clamp((now - start) / (float) duration);
+            return t * t * (3 - 2 * t);
+        }
+
+        private String identity(Recs.Pick p) {
+            return Recs.key(p);
+        }
+
+        /**
+         * Los callbacks de imágenes no sustituyen la página mientras
+         * está entrando. Al terminar la animación se consulta de nuevo.
+         */
+        void update() {
+            if (paging()) return;
+
+            total = recs.available(TAB_KIND[tab]);
+            if (total == 0) {
+                recommendationOffset = 0;
+            } else if (recommendationOffset >= total) {
+                recommendationOffset = ((total - 1) / 3) * 3;
+            }
+
+            recs.setWindow(TAB_KIND[tab], recommendationOffset);
+
+            List<Recs.Pick> next = recs.now(TAB_KIND[tab]);
+            boolean changed = !samePicks(next, cards);
+            Backdrop[] nextArt = new Backdrop[3];
+
+            for (int i = 0; i < next.size() && i < 3; i++) {
+                Recs.Pick p = next.get(i);
+                Backdrop ready = recs.backdrop(p);
+
+                // Si cambia la imagen de un mismo título, mantener
+                // la anterior hasta que la nueva esté preparada.
+                if (ready == null) {
+                    for (int j = 0; j < cards.size() && j < 3; j++) {
+                        if (identity(p).equals(identity(cards.get(j)))) {
+                            ready = art[j];
+                            break;
+                        }
+                    }
+                }
+                nextArt[i] = ready;
+            }
+
+            cards = next;
+            art = nextArt;
+            cardIndex = Math.max(
+                    0, Math.min(cardIndex, cards.size() - 1));
+
+            if (cards.isEmpty() && zone == Z_CARDS) {
+                zone = Z_SHELF;
+            }
+
+            if (changed) {
+                layout(true);
+                retarget(false);
+                spoken.focusMoved();
+            }
+
+            updateBackground();
+            prefetchNeighbours();
+            heroDirty = true;
+        }
+
+        private void updateBackground() {
+            if (cards.isEmpty()) {
+                showBackdrop(null);
+                return;
+            }
+
+            Backdrop b = art[Math.min(cardIndex, cards.size() - 1)];
+            if (b != null) showBackdrop(b);
+        }
+
+        /**
+         * Primero las visibles; después, como máximo, los dos grupos
+         * vecinos. No se preparan todas las categorías a la vez.
+         */
+        private void prefetchNeighbours() {
+            if (cards.isEmpty()) return;
+
+            for (int i = 0; i < cards.size() && i < 3; i++) {
+                if (art[i] == null) return;
+            }
+
+            int[] offsets = {
+                    recommendationOffset + 3,
+                    recommendationOffset - 3
+            };
+
+            for (int offset : offsets) {
+                if (offset < 0 || offset >= total) continue;
+                for (Recs.Pick p : recs.pageAt(TAB_KIND[tab], offset)) {
+                    // No preparar una imagen provisional si todavía
+                    // faltan los detalles definitivos del título.
+                    if (p.detailed && p.pkg != null) {
+                        recs.backdrop(p);
+                    }
+                }
+            }
+        }
+
+        void focus(boolean snap) {
+            int target = cards.isEmpty()
+                    ? 0
+                    : Math.min(cardIndex, cards.size() - 1);
+
+            if (!snap && selected == target) return;
+
+            long now = SystemClock.uptimeMillis();
+            advanceFocus(now);
+            selected = target;
+
+            if (snap) {
+                focusAt = 0;
+                for (int i = 0; i < 3; i++) {
+                    weight[i] = i == selected ? 1 : 0;
+                }
+                positionCards();
+            } else {
+                System.arraycopy(weight, 0, fromWeight, 0, 3);
+                focusAt = now;
+            }
+
+            updateBackground();
+            heroDirty = true;
+        }
+
+        void layout(boolean snap) {
+            focus(snap);
+            positionCards();
+        }
+
+        private void advanceFocus(long now) {
+            if (focusAt == 0) return;
+
+            float e = ease(focusAt, FOCUS_DURATION, now);
+            for (int i = 0; i < 3; i++) {
+                float target = i == selected ? 1 : 0;
+                weight[i] = fromWeight[i]
+                        + (target - fromWeight[i]) * e;
+            }
+
+            if (now - focusAt >= FOCUS_DURATION) {
+                focusAt = 0;
+                for (int i = 0; i < 3; i++) {
+                    weight[i] = i == selected ? 1 : 0;
+                }
+            }
+            positionCards();
+        }
+
+        /**
+         * La anchura grande sigue al elemento seleccionado.
+         * El orden de las recomendaciones nunca cambia por el foco.
+         */
+        private void positionCards() {
+            int count = Math.min(3, cards.size());
+            for (int i = count; i < 3; i++) {
+                cardRects[i].setEmpty();
+            }
+            if (count == 0) return;
+
+            float gap = L_CARD_GAP * k;
+            float room = (CONTENT_R - MARGIN) * k;
+            float narrow = L_TALL_W * k;
+            float extra = room - gap * (count - 1) - narrow * count;
+            float sum = 0;
+
+            for (int i = 0; i < count; i++) {
+                sum += Math.max(0, weight[i]);
+            }
+
+            float x = MARGIN * k;
+            for (int i = 0; i < count; i++) {
+                float share = sum > 0.001f
+                        ? Math.max(0, weight[i]) / sum
+                        : (i == cardIndex ? 1 : 0);
+
+                float width = narrow + extra * share;
+                float lift = 4 * k * share;
+                float top = L_CARDS_TOP * k - lift;
+                float height = L_CARD_H * k + lift * 2;
+
+                cardRects[i].set(x, top, x + width, top + height);
+                x += width + gap;
+            }
+        }
+
+        boolean changePage(int dir) {
+            if (paging()) return false;
+
+            int next = recommendationOffset + dir * 3;
+            if (next < 0 || next >= total) return false;
+
+            advanceFocus(SystemClock.uptimeMillis());
+
+            outgoing = new ArrayList<>(cards);
+            outgoingArt = art.clone();
+            for (int i = 0; i < 3; i++) {
+                outgoingRects[i].set(cardRects[i]);
+                outgoingWeight[i] = weight[i];
+                outgoingFocus[i] = Ui.clamp(cardFocus[i].value);
+            }
+
+            recommendationOffset = next;
+            cardIndex = dir > 0 ? 0 : 2;
+            update();
+            layout(true);
+
+            for (int i = 0; i < 3; i++) {
+                cardFocus[i].snap(
+                        zone == Z_CARDS && i == cardIndex ? 1 : 0);
+            }
+
+            direction = dir > 0 ? 1 : -1;
+            pageAt = SystemClock.uptimeMillis();
+
+            recs.refreshIfStale();
+            heroDirty = true;
+            wake();
+            return true;
+        }
+
+        void cancelPage() {
+            pageAt = 0;
+            outgoing.clear();
+            outgoingArt = new Backdrop[3];
+            heroDirty = true;
+        }
+
+        boolean step(long now) {
+            boolean moving = focusAt != 0 || paging();
+
+            advanceFocus(now);
+
+            if (paging() && now - pageAt >= PAGE_DURATION) {
+                cancelPage();
+                // Recuperar callbacks de datos/imágenes que llegaron
+                // mientras se estaba mostrando la transición.
+                update();
+            }
+            return moving;
+        }
+
+        float incomingOffset() {
+            if (!paging()) return 0;
+            float e = ease(pageAt, PAGE_DURATION,
+                    SystemClock.uptimeMillis());
+            return direction * (1 - e) * travel();
+        }
+
+        private float travel() {
+            return (CONTENT_R - MARGIN + L_CARD_GAP) * k;
+        }
+
+        void draw(Canvas c) {
+            int save = c.save();
+
+            // Recorta solo el carrusel: ni las pestañas ni las apps
+            // se desplazan con las recomendaciones.
+            c.clipRect(
+                    (MARGIN - 24) * k,
+                    (L_CARDS_TOP - 30) * k,
+                    (CONTENT_R + 24) * k,
+                    (L_CARDS_TOP + L_CARD_H + 94) * k);
+
+            if (paging()) {
+                float e = ease(pageAt, PAGE_DURATION,
+                        SystemClock.uptimeMillis());
+
+                c.save();
+                c.translate(-direction * e * travel(), 0);
+                for (int i = 0; i < outgoing.size() && i < 3; i++) {
+                    drawItem(c, outgoing.get(i), outgoingArt[i],
+                            outgoingRects[i], outgoingWeight[i],
+                            outgoingFocus[i]);
+                }
+                c.restore();
+
+                c.translate(direction * (1 - e) * travel(), 0);
+            }
+
+            for (int i = 0; i < cards.size() && i < 3; i++) {
+                drawItem(c, cards.get(i), art[i], cardRects[i],
+                        weight[i], Ui.clamp(cardFocus[i].value));
+            }
+
+            c.restoreToCount(save);
+            drawIndicators(c);
+        }
+
+        private void drawItem(Canvas c, Recs.Pick p, Backdrop b,
+                              RectF r, float expanded, float focused) {
+            if (r.isEmpty()) return;
+
+            float radius = 18 * k;
+
+            // Sombra de geometría fija, escalada al ancho animado.
+            // Evita crear una sombra distinta para cada fotograma.
+            c.save();
+            c.translate(r.centerX(), r.centerY());
+            c.scale(r.width() / (L_TALL_W * k),
+                    r.height() / (L_CARD_H * k));
+            tmp.set(
+                    -L_TALL_W * k / 2,
+                    -L_CARD_H * k / 2,
+                    L_TALL_W * k / 2,
+                    L_CARD_H * k / 2);
+            tmp.offset(0, (10 + 10 * focused) * k);
+            shadowDeep.setColor(Ui.alpha(
+                    0xFF000000,
+                    tone(0.14f, 0.30f) + 0.12f * focused));
+            shadows.draw(c, tmp, radius, DEEP_BLUR * k, shadowDeep);
+            c.restore();
+
+            // Siempre la misma imagen horizontal; cambia el recorte,
+            // no se estira una imagen vertical al expandir la tarjeta.
+            Bitmap image = b == null ? null : b.wide;
+            if (image != null && !image.isRecycled()) {
+                cropPhoto(c, image, r, radius);
+            } else {
+                decoration.setStyle(Paint.Style.FILL);
+                decoration.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
+                c.drawRoundRect(r, radius, radius, decoration);
+            }
+
+            if (focused > 0.01f) {
+                decoration.setStyle(Paint.Style.STROKE);
+                decoration.setStrokeWidth(2.5f * k);
+                decoration.setColor(
+                        Ui.alpha(0xFFFFFFFF, 0.85f * focused));
+                c.drawRoundRect(r, radius, radius, decoration);
+                decoration.setStyle(Paint.Style.FILL);
+            }
+
+            fitPaint.set(lCardTitle);
+            String title = p.title == null ? "" : p.title;
+            c.drawText(
+                    TextUtils.ellipsize(title, fitPaint, r.width(),
+                            TextUtils.TruncateAt.END).toString(),
+                    r.left, r.bottom + 42 * k, lCardTitle);
+
+            if (expanded > 0.01f && p.meta != null && !p.meta.isEmpty()) {
+                fitPaint.set(lCardMeta);
+                int alpha = lCardMeta.getAlpha();
+                lCardMeta.setAlpha(
+                        Math.round(alpha * Ui.clamp(expanded)));
+
+                c.drawText(
+                        TextUtils.ellipsize(p.meta, fitPaint, r.width(),
+                                TextUtils.TruncateAt.END).toString(),
+                        r.left, r.bottom + 76 * k, lCardMeta);
+                lCardMeta.setAlpha(alpha);
+            }
+        }
+
+        private void cropPhoto(Canvas c, Bitmap image,
+                               RectF destination, float radius) {
+            float ratio = destination.width() / destination.height();
+            int sw = image.getWidth();
+            int sh = image.getHeight();
+
+            int cw = Math.min(sw, Math.max(1, Math.round(sh * ratio)));
+            int ch = Math.min(sh, Math.max(1, Math.round(cw / ratio)));
+
+            int left = (sw - cw) / 2;
+            int top = (sh - ch) / 2;
+            source.set(left, top, left + cw, top + ch);
+
+            photoClip.reset();
+            photoClip.addRoundRect(
+                    destination, radius, radius, Path.Direction.CW);
+
+            int save = c.save();
+            c.clipPath(photoClip);
+            c.drawBitmap(image, source, destination, photo);
+            c.restoreToCount(save);
+        }
+
+        private void drawIndicators(Canvas c) {
+            if (cards.isEmpty()) return;
+
+            boolean left = recommendationOffset > 0 || cardIndex > 0;
+            boolean right = cardIndex + 1 < cards.size()
+                    || recommendationOffset + 3 < total;
+
+            float cy = (L_CARDS_TOP + L_CARD_H / 2) * k;
+            arrow(c, (MARGIN - 44) * k, cy, -1, left);
+            arrow(c, (CONTENT_R + 44) * k, cy, 1, right);
+
+            int count = pages();
+            if (count <= 1) return;
+
+            float spacing = 18 * k;
+            float x = w / 2f - (count - 1) * spacing / 2;
+            float y = (L_CARDS_TOP + L_CARD_H + 106) * k;
+
+            for (int i = 0; i < count; i++) {
+                boolean active = i == page();
+                decoration.setStyle(Paint.Style.FILL);
+                decoration.setColor(Ui.alpha(
+                        tone(L_INK, WHITE), active ? 0.95f : 0.28f));
+                c.drawCircle(
+                        x + i * spacing, y,
+                        (active ? 4.5f : 3.2f) * k, decoration);
+            }
+        }
+
+        private void arrow(Canvas c, float x, float y,
+                           int dir, boolean enabled) {
+            decoration.setStyle(Paint.Style.STROKE);
+            decoration.setStrokeWidth(2.6f * k);
+            decoration.setStrokeCap(Paint.Cap.ROUND);
+            decoration.setColor(Ui.alpha(
+                    tone(L_INK, WHITE), enabled ? 0.8f : 0.18f));
+
+            float dx = 6 * k;
+            float dy = 10 * k;
+            c.drawLine(x - dir * dx, y - dy,
+                    x + dir * dx, y, decoration);
+            c.drawLine(x + dir * dx, y,
+                    x - dir * dx, y + dy, decoration);
+
+            decoration.setStrokeCap(Paint.Cap.BUTT);
+            decoration.setStyle(Paint.Style.FILL);
+        }
+    }
     // MARK: - Helpers
 
     private static float smoothstep(float e0, float e1, float x) {
