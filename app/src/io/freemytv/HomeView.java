@@ -103,7 +103,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final String[] TABS_DE = {"Entdecken", "Filme", "Serien"};
     private static final String[] TAB_KIND = {null, "movie", "tv"};
     private static final int Z_TOP = 4, Z_CARDS = 5;
+    private static final int Z_APP_PAGE = 6;
 
+    private AppContentPage appContentPage;
+    private final Spring contentSlide = new Spring(0.46f, 0.92f, 0);
+    private boolean drawerFromContent;
+    private Paint headerClock;
     private final Activity activity;
     private final Scene scene = new Scene();
     private final HomeData data;
@@ -374,6 +379,24 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             v.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);   // TalkBack reads the items (Spoken)
             addView(v);
         }
+        appContentPage = new AppContentPage(
+                a, new AppContentPage.Navigation() {
+                    @Override
+                    public void toHome() {
+                        closeAppPage();
+                    }
+
+                    @Override
+                    public void toWeather() {
+                        openWeatherFromApps();
+                    }
+                });
+
+        appContentPage.setVisibility(INVISIBLE);
+
+        // Por encima del contenido principal, debajo de la hoja
+        // "Todos los apps" y de los avisos.
+        addView(appContentPage, getChildCount() - 2);
         setContentDescription("Free My TV");
         drawerLayer.setVisibility(INVISIBLE);
         for (int i = 0; i < 6; i++) {
@@ -423,11 +446,20 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         idle = false;
         Choreographer.getInstance().postFrameCallback(this);
         spoken.readAgain();
+        if (zone == Z_APP_PAGE) {
+            appContentPage.start();
+            appContentPage.post(() -> {
+                if (running && zone == Z_APP_PAGE) {
+                    appContentPage.restoreFocus();
+                }
+            });
+        }
     }
 
     void pause() {
         if (!running) return;
         running = false;
+        appContentPage.stop();
         cancelReorder(true);
         handler.removeCallbacks(holdStart);
         okHeld = holdArmed = false;
@@ -441,12 +473,22 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     void destroy() {
         pause();
+        appContentPage.destroyPage();
         click.release();
     }
 
     /** Starting state (Home pressed while the home screen is showing): first app focused, drawer and sheet closed. */
     void reset(boolean animated) {
         wake();
+        appContentPage.stop();
+        appContentPage.clearFocus();
+        drawerFromContent = false;
+
+        if (animated) contentSlide.target = 0;
+        else contentSlide.snap(0);
+
+        requestFocus();
+        motionDirty = true;
         recommendationMotion.cancelPage();
         cancelReorder(!animated);
         zone = Z_SHELF;
@@ -519,6 +561,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         measure(drawerLayer, width, Math.round(600 * kk));
         measure(sheetLayer, width, height);
         measure(toastLayer, Math.round(1000 * kk), Math.round(220 * kk));
+        measure(appContentPage, width, height);
         setMeasuredDimension(width, height);
     }
 
@@ -530,6 +573,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int width = r - l, height = b - t;
         float kk = width / 1920f;
         sky.layout(0, 0, width, height);
+        appContentPage.layout(0, 0, width, height);
         place(heroLayer, 0, 0);
         place(status, width - status.getMeasuredWidth(), 0);
         place(platter, 0, Math.round(750 * kk));
@@ -586,6 +630,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lQuote = Ui.numbers(Ui.regular, 21 * k, L_FAINT);
         lTip = Ui.text(Ui.semibold, 25 * k, L_INK);
         lTip.setTextAlign(Paint.Align.CENTER);
+        headerClock = Ui.numbers(Ui.medium, 30 * k, WHITE);
+        headerClock.setTextAlign(Paint.Align.RIGHT);
         lDate = Ui.text(Ui.semibold, 34 * k, L_DIM);
         lClock = Ui.numbers(Ui.light, 200 * k, L_INK);
         lClock.setLetterSpacing(-0.01f);
@@ -651,7 +697,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         heroMoving |= topMoving | cardsMoving;
         boolean drawerItemsMoving = step(drawerFocus, dt);
         boolean gridMoving = step(gridFocus, dt) | scroll.step(dt);
-        boolean drawerMoving = drawer.step(dt);
+        boolean drawerMoving = drawer.step(dt) | contentSlide.step(dt);
         boolean sheetMoving = sheet.step(dt);
         boolean toastFading = tickToast(up);
         boolean heroFading = tickHeroFade(up);
@@ -707,21 +753,45 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /** Drawer and sheet: the layers' positions and opacity (without redrawing their content). */
-    private void updateMotion() {
-        float d = drawer.value, dc = Ui.clamp(d), s = Ui.clamp(sheet.value);
-        float home = 1 - s, top = home * (1 - smoothstep(0, 0.32f, dc));
+   private void updateMotion() {
+        float d = drawer.value;
+        float dc = Ui.clamp(d);
+        float s = Ui.clamp(sheet.value);
+        float a = Ui.clamp(contentSlide.value);
+
+        float home = 1 - s;
         float shift = SHIFT * k;
-        float lift = -d * shift;
+
+        // Inicio -> página de apps -> página de clima.
+        // La página de clima conserva su composición original.
+        float originalVisibility = 1 - a * (1 - dc);
+        float lift = -d * shift - a * (1 - dc) * h;
+        float top = home * originalVisibility
+                * (1 - smoothstep(0, 0.32f, dc));
+
         show(heroLayer, top, lift);
         show(status, top, lift);
-        show(platter, home, lift);
-        show(tiles, home, lift);
+        show(platter, home * originalVisibility, lift);
+        show(tiles, home * originalVisibility, lift);
+
+        float pageY = ((1 - a) - dc) * h;
+        appContentPage.setTranslationY(pageY);
+        appContentPage.setAlpha(home * a);
+        appContentPage.setVisibility(
+                a > 0.001f && dc < 0.999f && home > 0.001f
+                        ? VISIBLE : INVISIBLE);
+
         float da = home * smoothstep(0.1f, 0.6f, dc);
-        drawerLayer.setTranslationY((1 - d) * shift);
+        float drawerTravel = drawerFromContent ? h : shift;
+
+        drawerLayer.setTranslationY((1 - d) * drawerTravel);
         drawerLayer.setAlpha(da);
         drawerLayer.setVisibility(da > 0.002f ? VISIBLE : INVISIBLE);
-        sheetLayer.setVisibility(s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
+
+        sheetLayer.setVisibility(
+                s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
         sheetLayer.setAlpha(s);
+
         float scale = 1.04f - 0.04f * s;
         sheetLayer.setScaleX(scale);
         sheetLayer.setScaleY(scale);
@@ -1459,7 +1529,54 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         quotesCard.set(wx ? split + 16 * k : left, cardsTop, right, cardsTop + CARDS_H * k);
         drawerDirty = true;
     }
+private void openAppPage() {
+        if (sheetOpen) return;
+        wake();
+        recommendationMotion.cancelPage();
+        cancelReorder(true);
 
+        drawerFromContent = false;
+        drawerOpen = false;
+        drawer.snap(0);
+        zone = Z_APP_PAGE;
+        contentSlide.target = 1;
+
+        appContentPage.start();
+        appContentPage.setVisibility(VISIBLE);
+        appContentPage.focusFirst();
+
+        retarget(false);
+        motionDirty = true;
+    }
+
+    private void closeAppPage() {
+        wake();
+        appContentPage.stop();
+        appContentPage.clearFocus();
+
+        contentSlide.target = 0;
+        drawerFromContent = false;
+        zone = Z_SHELF;
+        requestFocus();
+
+        retarget(false);
+        motionDirty = true;
+    }
+
+    private void openWeatherFromApps() {
+        if (drawerItems.isEmpty()) return;
+        wake();
+
+        appContentPage.stop();
+        appContentPage.clearFocus();
+        requestFocus();
+
+        drawerFromContent = true;
+        openDrawer();
+
+        retarget(false);
+        motionDirty = true;
+    }
     private void openDrawer() {
         if (drawerItems.isEmpty()) return;
         drawerOpen = true;
@@ -1470,14 +1587,29 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawerDirty = true;
     }
 
-    private void closeDrawer() {
+   private void closeDrawer() {
         drawerOpen = false;
         drawer.target = 0;
-        zone = Z_SHELF;
-        for (Spring f : drawerFocus) f.snap(0);   // the drawer goes away: its focus doesn't need to animate
-        if (!shelf.isEmpty() && drawerIndex < drawerRects.length) shelfIndex = nearest(tileRects, drawerRects[drawerIndex].centerX());
-    }
 
+        for (Spring f : drawerFocus) f.snap(0);
+
+        if (drawerFromContent) {
+            zone = Z_APP_PAGE;
+            contentSlide.target = 1;
+            appContentPage.start();
+            appContentPage.setVisibility(VISIBLE);
+            appContentPage.focusLast();
+        } else {
+            zone = Z_SHELF;
+            if (!shelf.isEmpty() && drawerIndex < drawerRects.length) {
+                shelfIndex = nearest(
+                        tileRects, drawerRects[drawerIndex].centerX());
+            }
+            requestFocus();
+        }
+
+        motionDirty = true;
+    }
     /** Color for the drawer's text and symbols: dark by day, white at night. */
     private int drawerInk(float alpha) {
         return Ui.alpha(tone(L_INK, 0xFFFFFFFF), alpha);
@@ -1956,6 +2088,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
         if (reordering) return reorderKey(e, down);
         int code = e.getKeyCode();
+        if (zone == Z_APP_PAGE
+                && code != KeyEvent.KEYCODE_BACK
+                && appContentPage.onRemote(e)) {
+            return true;
+        }
         if (down && code != KeyEvent.KEYCODE_DPAD_CENTER && code != KeyEvent.KEYCODE_ENTER
                 && code != KeyEvent.KEYCODE_NUMPAD_ENTER) {
             holdArmed = false;      // another key while OK is held: no move mode
@@ -2014,6 +2151,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void back() {
         if (sheetOpen) {
             closeSheet();
+        } else if (zone == Z_APP_PAGE) {
+            closeAppPage();
         } else if (zone == Z_DRAWER || zone == WIDGETS) {
             closeDrawer();
             retarget(false);
@@ -2394,7 +2533,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     @Override public AccessibilityNodeProvider getAccessibilityNodeProvider() {
-        return spoken;
+        return zone == Z_APP_PAGE ? null : spoken;
     }
 
     private void a11yItems(List<Integer> out) {
@@ -2832,8 +2971,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * Live TV, HDMI Inputs and Settings: icon-only glass circles (light by day, smoked at night); the focused one turns
      * white with a dark icon (the tvOS focus) and its name appears below it.
      */
-    private void drawLightButtons(Canvas c) {
+   private void drawLightButtons(Canvas c) {
         applyTone();
+
+        if (headerClock != null && topRects[3] != null) {
+            headerClock.setColor(tone(L_INK, WHITE));
+            c.drawText(
+                    clockText,
+                    topRects[3].left - 30 * k,
+                    topRects[3].centerY() + Ui.halfCap(headerClock),
+                    headerClock);
+        }
         for (int i = 0; i < 3; i++) {
             RectF r = topRects[3 + i];
             float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
@@ -2867,6 +3015,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         switch (zone) {
             case Z_SHELF:
+                if (dy > 0) {
+                    openAppPage();
+                    click.move();
+                    return true;
+                }
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
                 if (dy >= 0) return false;
                 if (cards.isEmpty()) {
