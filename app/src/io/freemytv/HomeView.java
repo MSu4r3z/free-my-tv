@@ -107,7 +107,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private AppContentPage appContentPage;
     private final Spring contentSlide = new Spring(0.46f, 0.92f, 0);
-    private boolean drawerFromContent;
     private Paint headerClock;
     private final Activity activity;
     private final Scene scene = new Scene();
@@ -482,7 +481,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         wake();
         appContentPage.stop();
         appContentPage.clearFocus();
-        drawerFromContent = false;
 
         if (animated) contentSlide.target = 0;
         else contentSlide.snap(0);
@@ -753,50 +751,51 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     /** Drawer and sheet: the layers' positions and opacity (without redrawing their content). */
-   private void updateMotion() {
-        float d = drawer.value;
-        float dc = Ui.clamp(d);
-        float s = Ui.clamp(sheet.value);
-        float a = Ui.clamp(contentSlide.value);
+  private void updateMotion() {
+    float d = drawer.value;
+    float dc = Ui.clamp(d);
+    float s = Ui.clamp(sheet.value);
+    float a = Ui.clamp(contentSlide.value);
 
-        float home = 1 - s;
-        float shift = SHIFT * k;
+    float home = 1 - s;
+    float shift = SHIFT * k;
 
-        // Inicio -> página de apps -> página de clima.
-        // La página de clima conserva su composición original.
-        float originalVisibility = 1 - a * (1 - dc);
-        float lift = -d * shift - a * (1 - dc) * h;
-        float top = home * originalVisibility
-                * (1 - smoothstep(0, 0.32f, dc));
+    // Páginas 1 y 2: transición del panel.
+    // Página 3: desplazamiento independiente de todo el conjunto.
+    float originalVisibility = 1 - a;
+    float lift = -d * shift - a * h;
+    float top = home * originalVisibility
+            * (1 - smoothstep(0, 0.32f, dc));
 
-        show(heroLayer, top, lift);
-        show(status, top, lift);
-        show(platter, home * originalVisibility, lift);
-        show(tiles, home * originalVisibility, lift);
+    show(heroLayer, top, lift);
+    show(status, top, lift);
+    show(platter, home * originalVisibility, lift);
+    show(tiles, home * originalVisibility, lift);
 
-        float pageY = ((1 - a) - dc) * h;
-        appContentPage.setTranslationY(pageY);
-        appContentPage.setAlpha(home * a);
-        appContentPage.setVisibility(
-                a > 0.001f && dc < 0.999f && home > 0.001f
-                        ? VISIBLE : INVISIBLE);
+    // El panel permanece abierto detrás de la página de apps.
+    float da = home * originalVisibility
+            * smoothstep(0.1f, 0.6f, dc);
 
-        float da = home * smoothstep(0.1f, 0.6f, dc);
-        float drawerTravel = drawerFromContent ? h : shift;
+    drawerLayer.setTranslationY((1 - d) * shift - a * h);
+    drawerLayer.setAlpha(da);
+    drawerLayer.setVisibility(
+            da > 0.002f ? VISIBLE : INVISIBLE);
 
-        drawerLayer.setTranslationY((1 - d) * drawerTravel);
-        drawerLayer.setAlpha(da);
-        drawerLayer.setVisibility(da > 0.002f ? VISIBLE : INVISIBLE);
+    // Página 3.
+    appContentPage.setTranslationY((1 - a) * h);
+    appContentPage.setAlpha(home * a);
+    appContentPage.setVisibility(
+            a > 0.001f && home > 0.001f
+                    ? VISIBLE : INVISIBLE);
 
-        sheetLayer.setVisibility(
-                s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
-        sheetLayer.setAlpha(s);
+    sheetLayer.setVisibility(
+            s > 0.001f || sheetOpen ? VISIBLE : INVISIBLE);
+    sheetLayer.setAlpha(s);
 
-        float scale = 1.04f - 0.04f * s;
-        sheetLayer.setScaleX(scale);
-        sheetLayer.setScaleY(scale);
-    }
-
+    float scale = 1.04f - 0.04f * s;
+    sheetLayer.setScaleX(scale);
+    sheetLayer.setScaleY(scale);
+}
     private static void show(View v, float alpha, float translationY) {
         v.setAlpha(alpha);
         v.setTranslationY(translationY);
@@ -1530,53 +1529,49 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         drawerDirty = true;
     }
 private void openAppPage() {
-        if (sheetOpen) return;
-        wake();
-        recommendationMotion.cancelPage();
-        cancelReorder(true);
+    if (sheetOpen || !drawerOpen || zone == Z_APP_PAGE) return;
 
-        drawerFromContent = false;
-        drawerOpen = false;
-        drawer.snap(0);
-        zone = Z_APP_PAGE;
-        contentSlide.target = 1;
+    wake();
+    recommendationMotion.cancelPage();
+    cancelReorder(true);
 
-        appContentPage.start();
-        appContentPage.setVisibility(VISIBLE);
-        appContentPage.focusFirst();
+    drawer.target = 1;
+    zone = Z_APP_PAGE;
+    contentSlide.target = 1;
 
-        retarget(false);
-        motionDirty = true;
+    appContentPage.start();
+    appContentPage.setVisibility(VISIBLE);
+    appContentPage.focusFirst();
+
+    retarget(false);
+    motionDirty = true;
+}
+
+   private void closeAppPage() {
+    wake();
+    appContentPage.stop();
+    appContentPage.clearFocus();
+
+    contentSlide.target = 0;
+    drawerOpen = true;
+    drawer.target = 1;
+
+    List<Integer> on = widgets();
+    if (talkBack() && !on.isEmpty()) {
+        zone = WIDGETS;
+        if (!on.contains(widgetIndex)) {
+            widgetIndex = on.get(0);
+        }
+    } else {
+        zone = Z_DRAWER;
     }
 
-    private void closeAppPage() {
-        wake();
-        appContentPage.stop();
-        appContentPage.clearFocus();
+    requestFocus();
+    retarget(false);
+    drawerDirty = true;
+    motionDirty = true;
+}
 
-        contentSlide.target = 0;
-        drawerFromContent = false;
-        zone = Z_SHELF;
-        requestFocus();
-
-        retarget(false);
-        motionDirty = true;
-    }
-
-    private void openWeatherFromApps() {
-        if (drawerItems.isEmpty()) return;
-        wake();
-
-        appContentPage.stop();
-        appContentPage.clearFocus();
-        requestFocus();
-
-        drawerFromContent = true;
-        openDrawer();
-
-        retarget(false);
-        motionDirty = true;
-    }
     private void openDrawer() {
         if (drawerItems.isEmpty()) return;
         drawerOpen = true;
@@ -1588,28 +1583,25 @@ private void openAppPage() {
     }
 
    private void closeDrawer() {
-        drawerOpen = false;
-        drawer.target = 0;
+    drawerOpen = false;
+    drawer.target = 0;
 
-        for (Spring f : drawerFocus) f.snap(0);
-
-        if (drawerFromContent) {
-            zone = Z_APP_PAGE;
-            contentSlide.target = 1;
-            appContentPage.start();
-            appContentPage.setVisibility(VISIBLE);
-            appContentPage.focusLast();
-        } else {
-            zone = Z_SHELF;
-            if (!shelf.isEmpty() && drawerIndex < drawerRects.length) {
-                shelfIndex = nearest(
-                        tileRects, drawerRects[drawerIndex].centerX());
-            }
-            requestFocus();
-        }
-
-        motionDirty = true;
+    for (Spring f : drawerFocus) {
+        f.snap(0);
     }
+
+    zone = Z_SHELF;
+
+    if (!shelf.isEmpty()
+            && drawerIndex >= 0
+            && drawerIndex < drawerRects.length) {
+        shelfIndex = nearest(
+                tileRects, drawerRects[drawerIndex].centerX());
+    }
+
+    requestFocus();
+    motionDirty = true;
+}
     /** Color for the drawer's text and symbols: dark by day, white at night. */
     private int drawerInk(float alpha) {
         return Ui.alpha(tone(L_INK, 0xFFFFFFFF), alpha);
@@ -2219,33 +2211,45 @@ private void openAppPage() {
                 }
                 break;
             case WIDGETS: {
-                List<Integer> on = widgets();
-                int at = on.indexOf(widgetIndex);
-                if (dy < 0 || at < 0) {
-                    zone = Z_DRAWER;
-                } else if (dx != 0 && at + dx >= 0 && at + dx < on.size()) {
-                    widgetIndex = on.get(at + dx);
-                } else {
-                    return;
-                }
-                break;
-            }
-            default:
-                if (dx != 0) {
-                    int next = Math.max(0, Math.min(drawerItems.size() - 1, drawerIndex + dx));
-                    if (next == drawerIndex) return;
-                    drawerIndex = next;
-                } else if (dy < 0) {
-                    closeDrawer();
-                } else if (talkBack() && !widgets().isEmpty()) {
-                    // Only with TalkBack: the widgets are there to be read, and this is how it gets to them.
-                    zone = WIDGETS;
-                    widgetIndex = widgets().get(0);
-                } else {
-                    return;
-                }
-                break;
+    List<Integer> on = widgets();
+    int at = on.indexOf(widgetIndex);
+
+    if (dy < 0 || at < 0) {
+        zone = Z_DRAWER;
+    } else if (dy > 0) {
+        openAppPage();
+    } else if (dx != 0
+            && at + dx >= 0
+            && at + dx < on.size()) {
+        widgetIndex = on.get(at + dx);
+    } else {
+        return;
+    }
+    break;
+}
+default:
+    if (dx != 0) {
+        int next = Math.max(
+                0,
+                Math.min(
+                        drawerItems.size() - 1,
+                        drawerIndex + dx));
+        if (next == drawerIndex) return;
+        drawerIndex = next;
+    } else if (dy < 0) {
+        closeDrawer();
+    } else if (dy > 0) {
+        if (talkBack() && !widgets().isEmpty()) {
+            // Conserva el acceso a widgets con TalkBack.
+            zone = WIDGETS;
+            widgetIndex = widgets().get(0);
+        } else {
+            openAppPage();
         }
+    } else {
+        return;
+    }
+    break;
         retarget(false);
         click.move();
     }
@@ -3014,12 +3018,22 @@ private void openAppPage() {
             return true;
         }
         switch (zone) {
-            case Z_SHELF:
-                if (dy > 0) {
-                    openAppPage();
-                    click.move();
-                    return true;
-                }
+           case Z_SHELF:
+    if (dy >= 0) return false;
+    if (cards.isEmpty()) {
+        zone = Z_TOP;
+        topIndex = picksOn() ? tab : 3;
+    } else {
+        zone = Z_CARDS;
+        cardIndex = nearest(
+                cardRects,
+                cards.size(),
+                shelf.isEmpty()
+                        ? w / 2f
+                        : tileRects[shelfIndex].centerX());
+    }
+    break;
+                
                 // Up from an empty shelf too: move()'s older zones (the hero, the corner capsule) aren't drawn any more.
                 if (dy >= 0) return false;
                 if (cards.isEmpty()) {
