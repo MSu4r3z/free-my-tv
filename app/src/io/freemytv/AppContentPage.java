@@ -1,3 +1,6 @@
+## `app/src/io/freemytv/AppContentPage.java`
+
+```java
 package io.freemytv;
 
 import android.app.Activity;
@@ -41,13 +44,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Página intermedia de canales publicados por las aplicaciones.
+ * Página 3: canales publicados por las aplicaciones.
  * Solo lectura: no modifica las listas ni el historial de las apps.
+ *
+ * Arriba desde la primera fila regresa al panel de tiempo/cripto/HDMI.
+ * Abajo desde la última fila permanece en esta página.
  */
 final class AppContentPage extends LinearLayout {
     interface Navigation {
-        void toHome();
-        void toWeather();
+        void toPreviousPage();
     }
 
     private static final String ANIKEN = "com.shubh.anililitv";
@@ -152,8 +157,8 @@ final class AppContentPage extends LinearLayout {
         }
 
         TextView help = text(
-                "← → Explorar   ·   ↑ Inicio / fila anterior"
-                + "   ·   ↓ Fila siguiente / clima",
+                "← → Explorar   ·   ↑ Panel / fila anterior"
+                + "   ·   ↓ Fila siguiente   ·   Atrás: panel",
                 19, 0xFFADB5C4);
         help.setGravity(Gravity.CENTER);
         addView(help, new LayoutParams(
@@ -226,8 +231,9 @@ final class AppContentPage extends LinearLayout {
     }
 
     /**
-     * HomeActivity ya entrega las teclas a HomeView.
-     * Aquí se manejan únicamente las de esta página.
+     * HomeActivity entrega las teclas a HomeView.
+     * HomeView delega aquí las flechas y OK de esta página.
+     * Atrás se gestiona en HomeView.
      */
     boolean onRemote(KeyEvent event) {
         int code = event.getKeyCode();
@@ -248,14 +254,13 @@ final class AppContentPage extends LinearLayout {
                 if (down) {
                     okPressed = false;
                     if (code == KeyEvent.KEYCODE_DPAD_UP) {
-                        if (selectedRow == 0) navigation.toHome();
-                        else selectRow(selectedRow - 1);
-                    } else {
-                        if (selectedRow == rows.size() - 1) {
-                            navigation.toWeather();
+                        if (selectedRow == 0) {
+                            navigation.toPreviousPage();
                         } else {
-                            selectRow(selectedRow + 1);
+                            selectRow(selectedRow - 1);
                         }
+                    } else if (selectedRow < rows.size() - 1) {
+                        selectRow(selectedRow + 1);
                     }
                 }
                 return true;
@@ -524,8 +529,8 @@ final class AppContentPage extends LinearLayout {
         }
 
         /**
-         * Solo se mantienen imágenes en las tarjetas de la ventana
-         * visible y una vecina a cada lado.
+         * Mantiene imágenes en la ventana visible y una tarjeta
+         * vecina a cada lado.
          */
         void syncImages() {
             if (!active || destroyed || images.isEmpty()) return;
@@ -534,7 +539,8 @@ final class AppContentPage extends LinearLayout {
             int start = Math.max(0, scroll.getScrollX() / stride - 1);
             int end = Math.min(
                     images.size() - 1,
-                    (scroll.getScrollX() + Math.max(scroll.getWidth(), px(900)))
+                    (scroll.getScrollX()
+                            + Math.max(scroll.getWidth(), px(900)))
                             / stride + 1);
 
             for (int i = 0; i < images.size(); i++) {
@@ -624,8 +630,7 @@ final class AppContentPage extends LinearLayout {
             }
         }
 
-        // Aniken: únicamente entradas de tipo continuar,
-        // con progreso numérico incompleto.
+        // Aniken: continuar viendo con progreso numérico incompleto.
         try (Cursor c = activity.getContentResolver().query(
                 Uri.parse("content://android.media.tv/watch_next_program"),
                 null, null, null, null)) {
@@ -754,7 +759,8 @@ final class AppContentPage extends LinearLayout {
         }
     }
 
-    private static long number(Cursor cursor, String column, long fallback) {
+    private static long number(
+            Cursor cursor, String column, long fallback) {
         try {
             String text = value(cursor, column);
             return text.isEmpty() ? fallback : Long.parseLong(text);
@@ -785,7 +791,8 @@ final class AppContentPage extends LinearLayout {
                 if (destroyed) return;
 
                 if (ready == null) {
-                    imageFailures.put(address, SystemClock.elapsedRealtime());
+                    imageFailures.put(
+                            address, SystemClock.elapsedRealtime());
                 } else {
                     imageFailures.remove(address);
                     imageCache.put(address, ready);
@@ -856,8 +863,8 @@ final class AppContentPage extends LinearLayout {
     }
 
     /**
-     * Respeta los intent_uri publicados, pero limita el destino a
-     * la aplicación que publicó la tarjeta.
+     * Respeta el intent_uri publicado, limitando el destino
+     * a la aplicación que publicó la tarjeta.
      */
     private void open(Entry entry) {
         try {
@@ -890,8 +897,6 @@ final class AppContentPage extends LinearLayout {
         } catch (Exception ignored) {
         }
 
-        // Si el enlace no funciona, abrir la aplicación sin afirmar
-        // que se ha reanudado el título.
         try {
             Intent fallback = HomeApps.launchIntent(
                     activity.getPackageManager(), entry.pkg);
@@ -910,3 +915,4 @@ final class AppContentPage extends LinearLayout {
                 Toast.LENGTH_SHORT).show();
     }
 }
+```
