@@ -72,6 +72,21 @@ public class TvDataDiagnosticActivity extends Activity {
             inspectPrograms(report, groups);
 
             final String result = report.toString();
+            android.util.Log.i(
+                    "FreeMyTVDiag",
+                    "========== INICIO DEL INFORME "
+                            + System.currentTimeMillis()
+                            + " ==========");
+
+            for (String line : result.split("\\r?\\n")) {
+                android.util.Log.i(
+                        "FreeMyTVDiag",
+                        line.isEmpty() ? " " : line);
+            }
+
+            android.util.Log.i(
+                    "FreeMyTVDiag",
+                    "========== FIN DEL INFORME ==========");
             runOnUiThread(() -> {
                 if (!isFinishing() && !isDestroyed()) {
                     output.setText(result);
