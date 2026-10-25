@@ -394,6 +394,13 @@ final class HomeView extends ViewGroup
                     public void opened() {
                         click.open();
                     }
+
+                    @Override
+                    public void background(Backdrop backdrop) {
+                        if (zone != Z_APP_PAGE) return;
+                        wake();
+                        showBackdrop(backdrop);
+                    }
                 });
         appContentPage.setVisibility(INVISIBLE);
         addView(appContentPage, getChildCount() - 2);
@@ -487,6 +494,7 @@ final class HomeView extends ViewGroup
         recommendationMotion.cancelPage();
         cancelReorder(!animated);
         zone = Z_SHELF;
+            recommendationMotion.updateBackground();
         shelfIndex = 0;
         sheetOpen = false;
         drawerOpen = false;
@@ -1620,7 +1628,7 @@ private float veiledAlpha;
         motionDirty = true;
     }
 
-    private void closeAppPage() {
+   private void closeAppPage() {
         wake();
         appContentPage.stop();
         appContentPage.clearFocus();
@@ -1635,6 +1643,9 @@ private float veiledAlpha;
         } else {
             zone = Z_DRAWER;
         }
+
+        // La página 2 vuelve al fondo de la recomendación de la página 1.
+        recommendationMotion.updateBackground();
 
         requestFocus();
         retarget(false);
@@ -3358,6 +3369,8 @@ private float veiledAlpha;
         }
 
         private void updateBackground() {
+            // En la página 3 manda la cartilla seleccionada, no las recomendaciones.
+            if (zone == Z_APP_PAGE) return;
             if (cards.isEmpty()) {
                 showBackdrop(null);
                 return;
