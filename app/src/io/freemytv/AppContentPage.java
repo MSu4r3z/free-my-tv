@@ -13,6 +13,7 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -36,6 +37,8 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,10 +49,10 @@ import java.util.concurrent.Executors;
  * Página 3: canales publicados por las aplicaciones.
  * Solo lectura: no modifica las listas ni el historial de las apps.
  *
- * Mismo lenguaje visual que las páginas 1 y 2: fondo transparente (se ve el
- * mismo cielo de HomeView), carruseles de 4.5 cartillas, la seleccionada solo
- * crece (sin borde) y su nombre aparece debajo. Cada carrusel lleva el nombre
- * de su app como título. Los colores siguen el día/noche de HomeView.
+ * Mismo lenguaje visual que las páginas 1 y 2: el fondo cambia con la cartilla
+ * seleccionada (como las recomendaciones de la página 1), carruseles con
+ * cartillas 16:9 completas, la seleccionada solo crece (sin borde) y su nombre
+ * aparece debajo. Cada carrusel lleva el nombre de su app como título.
  *
  * Arriba desde la primera fila con contenido regresa al panel anterior.
  * Abajo desde la última fila permanece en esta página.
@@ -63,6 +66,9 @@ final class AppContentPage extends LinearLayout {
 
         /** Se abrió un contenido (suena el clic de abrir). */
         default void opened() {}
+
+        /** Fondo listo para la cartilla seleccionada. */
+        default void background(Backdrop backdrop) {}
     }
 
     private static final String ANIKEN = "com.shubh.anililitv";
@@ -88,11 +94,16 @@ final class AppContentPage extends LinearLayout {
 
     // ---- Estilo (mismos valores que HomeView) ----
     private static final int ROWS = 4;
-    private static final float VISIBLE_CARDS = 4.5f;
-    private static final float FOCUS_SCALE = 1.08f;
+    // Con 4 carruseles de cartillas 16:9 completas en 1080 px de alto caben
+    // unas 5.5 por fila (media cartilla asoma a la derecha). Con 4.5 las
+    // cartillas no crecen: solo se separan más.
+    private static final float VISIBLE_CARDS = 5.5f;
+    private static final float FOCUS_SCALE = 1.07f;
     private static final long FOCUS_MS = 200;
     private static final long SCROLL_MS = 240;
     private static final long IMAGE_FADE_MS = 200;
+    private static final float CAPTION_CARDS = 1.4f; // ancho del nombre, en cartillas
+    private static final int MAX_BACKDROPS = 8;
     private static final int INK_LIGHT = 0xFF1D1D1F;    // L_INK
     private static final int INK_NIGHT = 0xFFF5F5F7;    // WHITE
     private static final int TITLE_LIGHT = 0xFF6E6E73;  // L_DIM
@@ -111,6 +122,8 @@ final class AppContentPage extends LinearLayout {
             Executors.newSingleThreadExecutor();
     private final ExecutorService imageWorker =
             Executors.newSingleThreadExecutor();
+    private final ExecutorService backdropWorker =
+            Executors.newSingleThreadExecutor();
 
     private final Set<String> pendingImages = new HashSet<>();
     private final Map<String, Long> imageFailures = new HashMap<>();
@@ -123,6 +136,12 @@ final class AppContentPage extends LinearLayout {
                 }
             };
 
+    // Fondos ya construidos (solo se usan desde el hilo principal).
+    private final Map<String, Backdrop> backdrops =
+            new LinkedHashMap<>(16, 0.75f, true);
+    private final Set<String> building = new HashSet<>();
+    private String focusedImage;
+
     private final List<Row> rows = new ArrayList<>();
     private final float scale;
 
@@ -133,7 +152,7 @@ final class AppContentPage extends LinearLayout {
     private final int radius;
     private final int titleH;
     private final int topGap;
-    private final int captionGap;
+    private final int captionTop;
     private final int captionH;
     private final int cellW;
     private final int cellH;
@@ -197,24 +216,40 @@ final class AppContentPage extends LinearLayout {
         scale = Math.max(0.3f, width / 1920f);
 
         margin = px(80);               // MARGIN de HomeView
-        inset = px(10);                // media separación entre cartillas
         radius = px(18);               // esquinas de las tarjetas
-        titleH = px(36);
-        topGap = px(8);                // espacio para el crecimiento al enfocar
-        captionGap = px(6);
-        captionH = px(32);
-        stripPad = margin - inset;
+        titleH = px(34);
+        captionH = px(30);
 
-        int top = px(16);
+        int top = px(12);
         int bottom = px(8);
         int rowH = Math.max(px(150), (height - top - bottom) / ROWS);
+        int gap = px(8);
 
-        cellH = rowH - titleH;
-        // 4 cartillas completas + media: el ancho útil se divide en 4.5.
-        cellW = Math.round((width - stripPad) / VISIBLE_CARDS);
-        imgW = cellW - 2 * inset;
-        imgH = Math.max(px(60), Math.min(Math.round(imgW * 9f / 16f),
-                cellH - topGap - captionGap - captionH));
+        // La imagen es 16:9; su alto máximo es lo que sobra de la fila
+        // después del título, los espacios y el nombre.
+        int maxImgH = Math.max(
+                px(80), rowH - titleH - 2 * gap - captionH - px(4));
+
+        int ins0 = px(12);
+        int cw = Math.round((width - (margin - ins0)) / VISIBLE_CARDS);
+        int iw = cw - 2 * ins0;
+        int ih = Math.round(iw * 9f / 16f);
+        if (ih > maxImgH) {
+            ih = maxImgH;
+            iw = Math.round(ih * 16f / 9f);
+        }
+
+        cellW = cw;
+        imgW = iw;
+        imgH = ih;
+        inset = Math.max(0, (cw - iw) / 2);
+        stripPad = Math.max(0, margin - inset);
+
+        int slack = Math.max(
+                0, rowH - titleH - 2 * gap - captionH - ih);
+        topGap = gap + slack / 2;
+        captionTop = topGap + ih + gap;
+        cellH = Math.max(captionTop + captionH, rowH - titleH);
 
         rounded = new ViewOutlineProvider() {
             @Override
@@ -235,7 +270,7 @@ final class AppContentPage extends LinearLayout {
             Row row = new Row(i);
             rows.add(row);
             addView(row.root, new LayoutParams(
-                    LayoutParams.MATCH_PARENT, rowH));
+                    LayoutParams.MATCH_PARENT, titleH + cellH));
         }
     }
 
@@ -262,7 +297,7 @@ final class AppContentPage extends LinearLayout {
         view.setTextSize(
                 android.util.TypedValue.COMPLEX_UNIT_PX, px(size));
         view.setSingleLine(true);
-        view.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        view.setEllipsize(TextUtils.TruncateAt.END);
         view.setGravity(Gravity.CENTER_VERTICAL);
         return view;
     }
@@ -305,6 +340,7 @@ final class AppContentPage extends LinearLayout {
     void stop() {
         active = false;
         okPressed = false;
+        focusedImage = null;
         main.removeCallbacks(refresh);
         for (Row row : rows) row.cancelScroll();
     }
@@ -316,7 +352,10 @@ final class AppContentPage extends LinearLayout {
         main.removeCallbacksAndMessages(null);
         dataWorker.shutdownNow();
         imageWorker.shutdownNow();
+        backdropWorker.shutdownNow();
         imageCache.evictAll();
+        backdrops.clear();
+        building.clear();
         pendingImages.clear();
         imageFailures.clear();
 
@@ -435,6 +474,52 @@ final class AppContentPage extends LinearLayout {
         }
     }
 
+    /**
+     * Pide el fondo de la cartilla seleccionada. Si la imagen aún no está
+     * descargada, se reintenta cuando llegue (ver requestImage).
+     */
+    private void wantBackground(String address) {
+        focusedImage = address;
+        if (address == null || address.isEmpty() || destroyed || !active) return;
+
+        Backdrop ready = backdrops.get(address);
+        if (ready != null) {
+            navigation.background(ready);
+            return;
+        }
+
+        final Bitmap bitmap = imageCache.get(address);
+        if (bitmap == null) {
+            requestImage(address);
+            return;
+        }
+        if (!building.add(address)) return;
+
+        backdropWorker.execute(() -> {
+            Backdrop made = null;
+            try {
+                made = Backdrop.background(bitmap);
+            } catch (RuntimeException | OutOfMemoryError ignored) {
+            }
+
+            final Backdrop result = made;
+            main.post(() -> {
+                building.remove(address);
+                if (destroyed || result == null) return;
+
+                backdrops.put(address, result);
+                while (backdrops.size() > MAX_BACKDROPS) {
+                    Iterator<String> eldest = backdrops.keySet().iterator();
+                    eldest.next();
+                    eldest.remove();
+                }
+                if (active && address.equals(focusedImage)) {
+                    navigation.background(result);
+                }
+            });
+        });
+    }
+
     private final class Row {
         final int index;
         final LinearLayout root;
@@ -463,7 +548,7 @@ final class AppContentPage extends LinearLayout {
             root.setClipChildren(false);
 
             // Título del carrusel: nombre de la app.
-            title = text(TITLES[index], 24, titleColor);
+            title = text(TITLES[index], 22, titleColor);
             title.setTypeface(semibold());
             title.setGravity(Gravity.BOTTOM | Gravity.START);
             title.setPadding(margin, 0, margin, px(4));
@@ -484,7 +569,8 @@ final class AppContentPage extends LinearLayout {
             strip = new LinearLayout(activity);
             strip.setOrientation(HORIZONTAL);
             strip.setClipChildren(false);
-            strip.setPadding(stripPad, 0, margin, 0);
+            // A la derecha queda sitio para el nombre de la última cartilla.
+            strip.setPadding(stripPad, 0, margin + cellW / 2, 0);
 
             scroll.addView(strip, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -614,12 +700,9 @@ final class AppContentPage extends LinearLayout {
             cell.setFocusable(true);
             cell.setClickable(true);
             cell.setClipChildren(false);
-            // La escala se hace alrededor del centro de la imagen,
-            // no del nombre que hay debajo.
-            cell.setPivotX(cellW / 2f);
-            cell.setPivotY(topGap + imgH / 2f);
 
-            // Imagen con esquinas redondeadas.
+            // Imagen 16:9 con esquinas redondeadas. Solo esta crece al
+            // enfocar; el nombre no se mueve ni invade la fila de abajo.
             FrameLayout box = new FrameLayout(activity);
             box.setBackgroundColor(holder);
             box.setClipToOutline(true);
@@ -664,14 +747,19 @@ final class AppContentPage extends LinearLayout {
             boxParams.topMargin = topGap;
             cell.addView(box, boxParams);
 
-            // Nombre: solo visible con la cartilla seleccionada.
-            TextView caption = text(entry.title, 25, ink);
+            // Nombre: solo visible con la cartilla seleccionada. Es más
+            // ancho que la cartilla y, si aun así no cabe, se desplaza.
+            TextView caption = text(entry.title, 23, ink);
             caption.setTypeface(semibold());
-            caption.setPadding(inset, 0, inset, 0);
+            caption.setEllipsize(TextUtils.TruncateAt.MARQUEE);
+            caption.setMarqueeRepeatLimit(-1);
             caption.setAlpha(0f);
             FrameLayout.LayoutParams captionParams =
-                    new FrameLayout.LayoutParams(cellW, captionH);
-            captionParams.topMargin = topGap + imgH + captionGap;
+                    new FrameLayout.LayoutParams(
+                            Math.round(cellW * CAPTION_CARDS) - inset,
+                            captionH);
+            captionParams.leftMargin = inset;
+            captionParams.topMargin = captionTop;
             cell.addView(caption, captionParams);
             captions.add(caption);
 
@@ -680,11 +768,12 @@ final class AppContentPage extends LinearLayout {
             cell.setOnClickListener(view -> open(entry));
 
             cell.setOnFocusChangeListener((view, focused) -> {
-                animateFocus(cell, caption, focused);
+                animateFocus(cell, box, caption, focused);
                 if (focused) {
                     selectedRow = index;
                     selected = positionInRow;
                     revealSelected();
+                    wantBackground(entry.image);
                 }
             });
 
@@ -693,11 +782,15 @@ final class AppContentPage extends LinearLayout {
             images.add(image);
         }
 
-        private void animateFocus(View cell, View caption, boolean focused) {
+        private void animateFocus(
+                View cell, View box, View caption, boolean focused) {
             float s = focused ? FOCUS_SCALE : 1f;
 
-            cell.animate().cancel();
-            cell.animate()
+            // La cartilla enfocada se dibuja por encima de sus vecinas.
+            cell.setTranslationZ(focused ? px(2) : 0f);
+
+            box.animate().cancel();
+            box.animate()
                 .scaleX(s)
                 .scaleY(s)
                 .setDuration(FOCUS_MS)
@@ -710,6 +803,8 @@ final class AppContentPage extends LinearLayout {
                 .setDuration(FOCUS_MS)
                 .setInterpolator(ease)
                 .start();
+            // Selected = el rótulo se desplaza si el nombre no cabe.
+            caption.setSelected(focused);
         }
 
         void move(int direction) {
@@ -727,6 +822,7 @@ final class AppContentPage extends LinearLayout {
             int at = Math.min(selected, cards.size() - 1);
             cards.get(at).requestFocus();
             revealSelected();
+            if (at < entries.size()) wantBackground(entries.get(at).image);
         }
 
         void activate() {
@@ -760,7 +856,7 @@ final class AppContentPage extends LinearLayout {
 
         /**
          * Mantiene la cartilla seleccionada visible y, cuando hay más
-         * a la derecha, deja asomar media cartilla (4.5 visibles).
+         * a la derecha, deja asomar media cartilla.
          */
         private void revealSelected() {
             if (cards.isEmpty() || !hasContent()) return;
@@ -817,6 +913,13 @@ final class AppContentPage extends LinearLayout {
 
                 Bitmap bitmap = imageCache.get(entry.image);
                 if (bitmap != null) {
+                    // Casi 16:9: llena la cartilla. Otra proporción (por
+                    // ejemplo un póster vertical): se muestra completa.
+                    float ratio = (float) bitmap.getWidth()
+                            / Math.max(1, bitmap.getHeight());
+                    view.setScaleType(Math.abs(ratio - 16f / 9f) < 0.08f
+                            ? ImageView.ScaleType.CENTER_CROP
+                            : ImageView.ScaleType.FIT_CENTER);
                     view.setImageBitmap(bitmap);
                     view.setTag(entry.image);
                     view.animate().cancel();
@@ -1060,6 +1163,11 @@ final class AppContentPage extends LinearLayout {
                     imageCache.put(address, ready);
                     if (active) {
                         for (Row row : rows) row.syncImages();
+                        // Si es la cartilla seleccionada, ya se puede
+                        // construir su fondo.
+                        if (address.equals(focusedImage)) {
+                            wantBackground(address);
+                        }
                     }
                 }
             });
@@ -1113,10 +1221,13 @@ final class AppContentPage extends LinearLayout {
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
 
+        // Se reduce solo mientras siga habiendo más píxeles de los que
+        // muestra la cartilla (con margen), para que los textos pequeños
+        // de las miniaturas se lean.
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inSampleSize = 1;
-        while (bounds.outWidth / options.inSampleSize > 640
-                || bounds.outHeight / options.inSampleSize > 400) {
+        int want = Math.round(imgW * 1.25f);
+        while (bounds.outWidth / (options.inSampleSize * 2) >= want) {
             options.inSampleSize *= 2;
         }
 
