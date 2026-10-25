@@ -1,6 +1,4 @@
-## `app/src/io/freemytv/AppContentPage.java`
 
-```java
 package io.freemytv;
 
 import android.app.Activity;
