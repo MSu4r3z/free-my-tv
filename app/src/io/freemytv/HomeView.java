@@ -139,6 +139,7 @@ final class HomeView extends ViewGroup
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
     private Paint lTitle, lTab, lTabOn, lCardTitle, lCardMeta, lQuote, lTip,
             lDate, lClock, lWeather, lClockQuote;
+                 private Paint lClockSuffix;
     private Shader lightGradient;
 
     private List<HomeApps.Item> shelf = new ArrayList<>();
@@ -221,6 +222,7 @@ final class HomeView extends ViewGroup
     private int w, h;
     private float k = 1;
     private String clockText = "", dateText = "", weatherLine = "";
+        private String clockTime = "", clockSuffix = "";
     private long weatherLineAt = -1;
     private int weatherLinePrefs = -1;
     private String weatherLineLanguage = "";
@@ -626,6 +628,7 @@ final class HomeView extends ViewGroup
         lDate = Ui.text(Ui.semibold, 34 * k, L_DIM);
         lClock = Ui.numbers(Ui.light, 200 * k, L_INK);
         lClock.setLetterSpacing(-0.01f);
+             lClockSuffix = Ui.text(Ui.medium, 64 * k, L_DIM);
         lWeather = Ui.text(Ui.medium, 34 * k, L_DIM);
         lClockQuote = Ui.numbers(Ui.medium, 28 * k, L_DIM);
         lightGradient = null;
@@ -790,12 +793,16 @@ final class HomeView extends ViewGroup
         v.setVisibility(alpha > 0.002f ? VISIBLE : INVISIBLE);
     }
 
-    private boolean updateClock() {
+      private boolean updateClock() {
         long now = System.currentTimeMillis();
         long minute = now / 60_000;
         if (minute == clockMinute || clockPaint == null) return false;
         clockMinute = minute;
         clockText = Ui.clock(now);
+        // "9:47 PM" -> "9:47" y "PM" (el reloj grande dibuja el sufijo más pequeño).
+        int cut = clockText.lastIndexOf(' ');
+        clockTime = cut < 0 ? clockText : clockText.substring(0, cut);
+        clockSuffix = cut < 0 ? "" : clockText.substring(cut + 1);
         dateText = Ui.date(now);
         return true;
     }
@@ -972,6 +979,7 @@ final class HomeView extends ViewGroup
         heroDirty = statusDirty = tilesDirty = drawerDirty = true;
         sky.invalidate();
         platter.invalidate();
+        if (appContentPage != null) appContentPage.setNight(night);
     }
 
     private float dark() {
@@ -996,6 +1004,7 @@ final class HomeView extends ViewGroup
         lTip.setColor(tone(L_INK, WHITE));
         lDate.setColor(tone(L_DIM, 0xFF98989D));
         lClock.setColor(tone(L_INK, WHITE));
+            lClockSuffix.setColor(tone(L_DIM, 0xFF98989D));
         lWeather.setColor(tone(L_DIM, 0xFF98989D));
         lClockQuote.setColor(tone(L_DIM, 0xFF98989D));
         staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
@@ -2963,8 +2972,13 @@ final class HomeView extends ViewGroup
         float x = MARGIN * k;
         c.drawText(dateText,
                 x - Ui.leftBearing(lDate, dateText), L_DATE_BASE * k, lDate);
-        c.drawText(clockText,
-                x - Ui.leftBearing(lClock, clockText), L_CLOCK_BASE * k, lClock);
+       float clockX = x - Ui.leftBearing(lClock, clockTime);
+        c.drawText(clockTime, clockX, L_CLOCK_BASE * k, lClock);
+        if (!clockSuffix.isEmpty()) {
+            c.drawText(clockSuffix,
+                    clockX + lClock.measureText(clockTime) + 20 * k,
+                    L_CLOCK_BASE * k, lClockSuffix);
+        }
         HomeData.Weather wx = data.weather;
         if (!Prefs.weather() || Double.isNaN(wx.temp)) return;
         if (data.weatherAt != weatherLineAt
