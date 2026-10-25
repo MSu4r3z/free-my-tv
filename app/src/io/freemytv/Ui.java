@@ -162,10 +162,12 @@ final class Ui {
         return "de".equals(tv.getLanguage()) ? tv : Locale.GERMANY;
     }
 
-    /** "21:47" (in English, "9:47", like the iPhone in the US). */
+    /**
+     * "9:47 PM" in every language (12-hour clock). Locale.US keeps the suffix as plain "AM"/"PM"; some locales
+     * (es, pt) would write "p. m.". Made once per minute: the screensaver asks for it on every frame.
+     */
     static String clock(long now) {
-        return en ? new SimpleDateFormat("h:mm", Locale.US).format(new Date(now))
-                : new SimpleDateFormat("HH:mm", locale()).format(new Date(now));
+        return once("clock", now / 60_000L, () -> new SimpleDateFormat("h:mm a", Locale.US).format(new Date(now)));
     }
 
     /** "5:21" (sunrise and sunset; in English, "5:21 AM"). */
