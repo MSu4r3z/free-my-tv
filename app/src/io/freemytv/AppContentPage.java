@@ -7,10 +7,8 @@ import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Color;
 import android.graphics.Outline;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -49,8 +47,9 @@ import java.util.concurrent.Executors;
  * Solo lectura: no modifica las listas ni el historial de las apps.
  *
  * Mismo lenguaje visual que las páginas 1 y 2: fondo transparente (se ve el
- * mismo cielo de HomeView), carruseles de 4.5 cartillas, aro en la seleccionada
- * y nombre solo al enfocar. Los colores siguen el día/noche de HomeView.
+ * mismo cielo de HomeView), carruseles de 4.5 cartillas, la seleccionada solo
+ * crece (sin borde) y su nombre aparece debajo. Cada carrusel lleva el nombre
+ * de su app como título. Los colores siguen el día/noche de HomeView.
  *
  * Arriba desde la primera fila con contenido regresa al panel anterior.
  * Abajo desde la última fila permanece en esta página.
@@ -58,6 +57,12 @@ import java.util.concurrent.Executors;
 final class AppContentPage extends LinearLayout {
     interface Navigation {
         void toPreviousPage();
+
+        /** El foco cambió de cartilla o de fila (suena el clic de mover). */
+        default void moved() {}
+
+        /** Se abrió un contenido (suena el clic de abrir). */
+        default void opened() {}
     }
 
     private static final String ANIKEN = "com.shubh.anililitv";
@@ -65,7 +70,15 @@ final class AppContentPage extends LinearLayout {
     private static final String SMARTTUBE = "org.smarttube.stable";
     private static final String NETFLIX = "com.netflix.ninja";
 
-    // Solo para accesibilidad (TalkBack); no se dibujan.
+    // Título visible de cada carrusel (nombre de la app).
+    private static final String[] TITLES = {
+        "Aniken",
+        "Stremio",
+        "SmartTube",
+        "Netflix"
+    };
+
+    // Solo para accesibilidad (TalkBack).
     private static final String[] HEADINGS = {
         "Aniken: Sigue viendo",
         "Stremio: Biblioteca",
@@ -76,15 +89,16 @@ final class AppContentPage extends LinearLayout {
     // ---- Estilo (mismos valores que HomeView) ----
     private static final int ROWS = 4;
     private static final float VISIBLE_CARDS = 4.5f;
-    private static final float FOCUS_SCALE = 1.05f;
+    private static final float FOCUS_SCALE = 1.08f;
     private static final long FOCUS_MS = 200;
     private static final long SCROLL_MS = 240;
     private static final long IMAGE_FADE_MS = 200;
-    private static final int INK_LIGHT = 0xFF1D1D1F;   // L_INK
-    private static final int INK_NIGHT = 0xFFF5F5F7;   // WHITE
+    private static final int INK_LIGHT = 0xFF1D1D1F;    // L_INK
+    private static final int INK_NIGHT = 0xFFF5F5F7;    // WHITE
+    private static final int TITLE_LIGHT = 0xFF6E6E73;  // L_DIM
+    private static final int TITLE_NIGHT = 0xB3FFFFFF;  // igual que rowTitle
     private static final int HOLDER_LIGHT = 0xFFDADADF;
     private static final int HOLDER_NIGHT = 0xFF2C2C2E;
-    private static final int RING_ALPHA = 0xE6;
 
     // Misma curva que RecommendationMotion.ease en HomeView.
     private final Interpolator ease = t -> t * t * (3 - 2 * t);
@@ -117,19 +131,20 @@ final class AppContentPage extends LinearLayout {
     private final int stripPad;
     private final int inset;
     private final int radius;
-    private final int ringStroke;
+    private final int titleH;
+    private final int topGap;
+    private final int captionGap;
     private final int captionH;
-    private final int vPad;
     private final int cellW;
     private final int cellH;
     private final int imgW;
     private final int imgH;
-    private final int ringH;
     private final ViewOutlineProvider rounded;
 
     // Tono día/noche (lo fija HomeView).
     private float tone;
     private int ink = INK_LIGHT;
+    private int titleColor = TITLE_LIGHT;
     private int holder = HOLDER_LIGHT;
 
     private boolean active;
@@ -181,25 +196,25 @@ final class AppContentPage extends LinearLayout {
         int height = metrics.heightPixels;
         scale = Math.max(0.3f, width / 1920f);
 
-        margin = px(80);                       // MARGIN de HomeView
-        inset = px(8);
-        radius = px(18);                       // esquinas de las tarjetas
-        ringStroke = Math.max(2, Math.round(2.5f * scale));
+        margin = px(80);               // MARGIN de HomeView
+        inset = px(10);                // media separación entre cartillas
+        radius = px(18);               // esquinas de las tarjetas
+        titleH = px(36);
+        topGap = px(8);                // espacio para el crecimiento al enfocar
+        captionGap = px(6);
         captionH = px(32);
-        vPad = px(8);
         stripPad = margin - inset;
 
-        int top = px(24);
-        int bottom = px(10);
-        int rowH = Math.max(px(120), (height - top - bottom) / ROWS);
+        int top = px(16);
+        int bottom = px(8);
+        int rowH = Math.max(px(150), (height - top - bottom) / ROWS);
 
-        cellH = rowH - 2 * vPad;
+        cellH = rowH - titleH;
         // 4 cartillas completas + media: el ancho útil se divide en 4.5.
         cellW = Math.round((width - stripPad) / VISIBLE_CARDS);
         imgW = cellW - 2 * inset;
-        imgH = Math.min(Math.round(imgW * 9f / 16f),
-                cellH - 2 * inset - captionH);
-        ringH = imgH + 2 * inset;
+        imgH = Math.max(px(60), Math.min(Math.round(imgW * 9f / 16f),
+                cellH - topGap - captionGap - captionH));
 
         rounded = new ViewOutlineProvider() {
             @Override
@@ -219,7 +234,7 @@ final class AppContentPage extends LinearLayout {
         for (int i = 0; i < ROWS; i++) {
             Row row = new Row(i);
             rows.add(row);
-            addView(row.scroll, new LayoutParams(
+            addView(row.root, new LayoutParams(
                     LayoutParams.MATCH_PARENT, rowH));
         }
     }
@@ -234,6 +249,12 @@ final class AppContentPage extends LinearLayout {
         return Math.max(1, Math.round(value * scale));
     }
 
+    private Typeface semibold() {
+        return Ui.semibold != null
+                ? Ui.semibold
+                : Typeface.create("sans-serif-medium", Typeface.NORMAL);
+    }
+
     private TextView text(String value, float size, int color) {
         TextView view = new TextView(activity);
         view.setText(value);
@@ -246,23 +267,17 @@ final class AppContentPage extends LinearLayout {
         return view;
     }
 
-    private GradientDrawable ringDrawable() {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(Color.TRANSPARENT);
-        drawable.setCornerRadius(radius + inset);
-        drawable.setStroke(ringStroke, Ui.alpha(ink, RING_ALPHA / 255f));
-        return drawable;
-    }
-
     private int skeletonColor() {
         return (holder & 0x00FFFFFF) | 0x99000000;
     }
 
-    private static int mix(int a, int b, float f) {
-        int r = Math.round(((a >> 16) & 255) * (1 - f) + ((b >> 16) & 255) * f);
-        int g = Math.round(((a >> 8) & 255) * (1 - f) + ((b >> 8) & 255) * f);
-        int bl = Math.round((a & 255) * (1 - f) + (b & 255) * f);
-        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    private static int blend(int a, int b, float f) {
+        int aa = a >>> 24, ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+        int ba = b >>> 24, br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+        return (Math.round(aa + (ba - aa) * f) << 24)
+                | (Math.round(ar + (br - ar) * f) << 16)
+                | (Math.round(ag + (bg - ag) * f) << 8)
+                | Math.round(ab + (bb - ab) * f);
     }
 
     /**
@@ -273,8 +288,9 @@ final class AppContentPage extends LinearLayout {
         float q = Math.round(Ui.clamp(night) * 32f) / 32f;
         if (q == tone) return;
         tone = q;
-        ink = mix(INK_LIGHT, INK_NIGHT, q);
-        holder = mix(HOLDER_LIGHT, HOLDER_NIGHT, q);
+        ink = blend(INK_LIGHT, INK_NIGHT, q);
+        titleColor = blend(TITLE_LIGHT, TITLE_NIGHT, q);
+        holder = blend(HOLDER_LIGHT, HOLDER_NIGHT, q);
         for (Row row : rows) row.applyTone();
     }
 
@@ -389,10 +405,14 @@ final class AppContentPage extends LinearLayout {
                             navigation.toPreviousPage();
                         } else {
                             selectRow(previous);
+                            navigation.moved();
                         }
                     } else {
                         int next = filledFrom(selectedRow, 1);
-                        if (next >= 0) selectRow(next);
+                        if (next >= 0) {
+                            selectRow(next);
+                            navigation.moved();
+                        }
                     }
                 }
                 return true;
@@ -417,12 +437,13 @@ final class AppContentPage extends LinearLayout {
 
     private final class Row {
         final int index;
+        final LinearLayout root;
+        final TextView title;
         final HorizontalScrollView scroll;
         final LinearLayout strip;
         final List<View> cards = new ArrayList<>();
         final List<ImageView> images = new ArrayList<>();
         final List<TextView> captions = new ArrayList<>();
-        final List<View> rings = new ArrayList<>();
         final List<View> boxes = new ArrayList<>();
         final List<View> skeletons = new ArrayList<>();
 
@@ -437,6 +458,20 @@ final class AppContentPage extends LinearLayout {
         Row(int index) {
             this.index = index;
 
+            root = new LinearLayout(activity);
+            root.setOrientation(VERTICAL);
+            root.setClipChildren(false);
+
+            // Título del carrusel: nombre de la app.
+            title = text(TITLES[index], 24, titleColor);
+            title.setTypeface(semibold());
+            title.setGravity(Gravity.BOTTOM | Gravity.START);
+            title.setPadding(margin, 0, margin, px(4));
+            title.setImportantForAccessibility(
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            root.addView(title, new LayoutParams(
+                    LayoutParams.MATCH_PARENT, titleH));
+
             scroll = new HorizontalScrollView(activity);
             scroll.setHorizontalScrollBarEnabled(false);
             scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -444,7 +479,6 @@ final class AppContentPage extends LinearLayout {
             scroll.setClipToPadding(false);
             scroll.setClipChildren(false);
             scroll.setFocusable(false);
-            scroll.setPadding(0, vPad, 0, vPad);
             scroll.setContentDescription(HEADINGS[index]);
 
             strip = new LinearLayout(activity);
@@ -455,6 +489,9 @@ final class AppContentPage extends LinearLayout {
             scroll.addView(strip, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
+
+            root.addView(scroll, new LayoutParams(
+                    LayoutParams.MATCH_PARENT, cellH));
 
             scroll.setOnScrollChangeListener(
                     (view, x, y, oldX, oldY) -> syncImages());
@@ -479,15 +516,14 @@ final class AppContentPage extends LinearLayout {
             cards.clear();
             images.clear();
             captions.clear();
-            rings.clear();
             boxes.clear();
             skeletons.clear();
         }
 
         /** Repinta los colores que dependen del día/noche. */
         void applyTone() {
+            title.setTextColor(titleColor);
             for (TextView t : captions) t.setTextColor(ink);
-            for (View v : rings) v.setBackground(ringDrawable());
             for (View v : boxes) v.setBackgroundColor(holder);
             for (View v : skeletons) v.setBackgroundColor(skeletonColor());
         }
@@ -511,7 +547,7 @@ final class AppContentPage extends LinearLayout {
                 FrameLayout.LayoutParams boxParams =
                         new FrameLayout.LayoutParams(imgW, imgH);
                 boxParams.leftMargin = inset;
-                boxParams.topMargin = inset;
+                boxParams.topMargin = topGap;
                 cell.addView(box, boxParams);
 
                 strip.addView(cell, new LayoutParams(cellW, cellH));
@@ -581,14 +617,7 @@ final class AppContentPage extends LinearLayout {
             // La escala se hace alrededor del centro de la imagen,
             // no del nombre que hay debajo.
             cell.setPivotX(cellW / 2f);
-            cell.setPivotY(ringH / 2f);
-
-            // Aro de foco (oculto hasta recibir foco).
-            View ring = new View(activity);
-            ring.setBackground(ringDrawable());
-            ring.setAlpha(0f);
-            cell.addView(ring, new FrameLayout.LayoutParams(cellW, ringH));
-            rings.add(ring);
+            cell.setPivotY(topGap + imgH / 2f);
 
             // Imagen con esquinas redondeadas.
             FrameLayout box = new FrameLayout(activity);
@@ -632,18 +661,17 @@ final class AppContentPage extends LinearLayout {
             FrameLayout.LayoutParams boxParams =
                     new FrameLayout.LayoutParams(imgW, imgH);
             boxParams.leftMargin = inset;
-            boxParams.topMargin = inset;
+            boxParams.topMargin = topGap;
             cell.addView(box, boxParams);
 
             // Nombre: solo visible con la cartilla seleccionada.
-            TextView caption = text(entry.title, 21, ink);
-            caption.setTypeface(
-                    Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            caption.setPadding(inset + px(4), 0, inset, 0);
+            TextView caption = text(entry.title, 25, ink);
+            caption.setTypeface(semibold());
+            caption.setPadding(inset, 0, inset, 0);
             caption.setAlpha(0f);
             FrameLayout.LayoutParams captionParams =
                     new FrameLayout.LayoutParams(cellW, captionH);
-            captionParams.topMargin = ringH;
+            captionParams.topMargin = topGap + imgH + captionGap;
             cell.addView(caption, captionParams);
             captions.add(caption);
 
@@ -652,7 +680,7 @@ final class AppContentPage extends LinearLayout {
             cell.setOnClickListener(view -> open(entry));
 
             cell.setOnFocusChangeListener((view, focused) -> {
-                animateFocus(cell, ring, caption, focused);
+                animateFocus(cell, caption, focused);
                 if (focused) {
                     selectedRow = index;
                     selected = positionInRow;
@@ -665,21 +693,13 @@ final class AppContentPage extends LinearLayout {
             images.add(image);
         }
 
-        private void animateFocus(View cell, View ring, View caption,
-                boolean focused) {
+        private void animateFocus(View cell, View caption, boolean focused) {
             float s = focused ? FOCUS_SCALE : 1f;
 
             cell.animate().cancel();
             cell.animate()
                 .scaleX(s)
                 .scaleY(s)
-                .setDuration(FOCUS_MS)
-                .setInterpolator(ease)
-                .start();
-
-            ring.animate().cancel();
-            ring.animate()
-                .alpha(focused ? 1f : 0f)
                 .setDuration(FOCUS_MS)
                 .setInterpolator(ease)
                 .start();
@@ -694,9 +714,12 @@ final class AppContentPage extends LinearLayout {
 
         void move(int direction) {
             if (!hasContent()) return;
-            selected = Math.max(
+            int next = Math.max(
                     0, Math.min(entries.size() - 1, selected + direction));
+            if (next == selected) return;
+            selected = next;
             focusSelected();
+            navigation.moved();
         }
 
         void focusSelected() {
@@ -1106,6 +1129,7 @@ final class AppContentPage extends LinearLayout {
      * a la aplicación que publicó la tarjeta.
      */
     private void open(Entry entry) {
+        navigation.opened();
         try {
             Intent intent = Intent.parseUri(
                     entry.intent, Intent.URI_INTENT_SCHEME);
