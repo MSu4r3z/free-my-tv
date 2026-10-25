@@ -3544,4 +3544,3 @@ final class HomeView extends ViewGroup
                 | Math.round(ab + (bb - ab) * f);
     }
 }
-```
