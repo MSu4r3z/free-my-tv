@@ -913,4 +913,3 @@ final class AppContentPage extends LinearLayout {
                 Toast.LENGTH_SHORT).show();
     }
 }
-```
