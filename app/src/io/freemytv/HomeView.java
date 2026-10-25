@@ -1,6 +1,3 @@
-## `app/src/io/freemytv/HomeView.java`
-
-```java
 package io.freemytv;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
