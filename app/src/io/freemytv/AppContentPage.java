@@ -1,6 +1,6 @@
-
 package io.freemytv;
 
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ResolveInfo;
@@ -8,6 +8,7 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -18,11 +19,14 @@ import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
+import android.view.animation.Interpolator;
+import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -45,7 +49,10 @@ import java.util.concurrent.Executors;
  * Página 3: canales publicados por las aplicaciones.
  * Solo lectura: no modifica las listas ni el historial de las apps.
  *
- * Arriba desde la primera fila regresa al panel de tiempo/cripto/HDMI.
+ * Mismo lenguaje visual que las páginas 1 y 2: carruseles de 4.5
+ * cartillas, aro blanco en la seleccionada y nombre solo al enfocar.
+ *
+ * Arriba desde la primera fila con contenido regresa al panel anterior.
  * Abajo desde la última fila permanece en esta página.
  */
 final class AppContentPage extends LinearLayout {
@@ -58,12 +65,29 @@ final class AppContentPage extends LinearLayout {
     private static final String SMARTTUBE = "org.smarttube.stable";
     private static final String NETFLIX = "com.netflix.ninja";
 
+    // Solo para accesibilidad (TalkBack); no se dibujan.
     private static final String[] HEADINGS = {
         "Aniken: Sigue viendo",
         "Stremio: Biblioteca",
         "SmartTube: Recomendaciones",
         "Netflix: Destacados"
     };
+
+    // ---- Estilo (ajustable) ----
+    private static final int ROWS = 4;
+    private static final float VISIBLE_CARDS = 4.5f;
+    private static final float FOCUS_SCALE = 1.06f;
+    private static final long FOCUS_IN_MS = 240;
+    private static final long FOCUS_OUT_MS = 180;
+    private static final long SCROLL_MS = 280;
+    private static final long IMAGE_FADE_MS = 200;
+    private static final int RING_COLOR = 0xE6FFFFFF;
+    private static final int PLACEHOLDER = 0xFF2A2E3A;
+    private static final int SKELETON = 0x802A2E3A;
+    private static final int BG_TOP = 0xFF262833;
+    private static final int BG_BOTTOM = 0xFF12131A;
+
+    private final Interpolator ease = new PathInterpolator(0.2f, 0f, 0f, 1f);
 
     private final Activity activity;
     private final Navigation navigation;
@@ -88,10 +112,25 @@ final class AppContentPage extends LinearLayout {
     private final List<Row> rows = new ArrayList<>();
     private final float scale;
 
+    // Medidas calculadas a partir de la pantalla.
+    private final int margin;
+    private final int stripPad;
+    private final int inset;
+    private final int radius;
+    private final int captionH;
+    private final int vPad;
+    private final int cellW;
+    private final int cellH;
+    private final int imgW;
+    private final int imgH;
+    private final int ringH;
+    private final ViewOutlineProvider rounded;
+
     private boolean active;
     private boolean destroyed;
     private boolean loading;
     private boolean okPressed;
+    private boolean pendingFocus;
     private int generation;
     private int selectedRow;
 
@@ -130,37 +169,54 @@ final class AppContentPage extends LinearLayout {
         this.activity = activity;
         this.navigation = navigation;
 
-        int width = activity.getResources()
-                .getDisplayMetrics().widthPixels;
+        android.util.DisplayMetrics metrics =
+                activity.getResources().getDisplayMetrics();
+        int width = metrics.widthPixels;
+        int height = metrics.heightPixels;
         scale = Math.max(0.3f, width / 1920f);
 
+        margin = px(60);
+        inset = px(8);
+        radius = px(18);
+        captionH = px(32);
+        vPad = px(8);
+        stripPad = margin - inset;
+
+        int top = px(24);
+        int bottom = px(10);
+        int rowH = Math.max(px(120), (height - top - bottom) / ROWS);
+
+        cellH = rowH - 2 * vPad;
+        // 4 cartillas completas + media: el ancho útil se divide en 4.5.
+        cellW = Math.round((width - stripPad) / VISIBLE_CARDS);
+        imgW = cellW - 2 * inset;
+        imgH = Math.min(Math.round(imgW * 9f / 16f),
+                cellH - 2 * inset - captionH);
+        ringH = imgH + 2 * inset;
+
+        rounded = new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, Outline outline) {
+                outline.setRoundRect(
+                        0, 0, view.getWidth(), view.getHeight(), radius);
+            }
+        };
+
         setOrientation(VERTICAL);
-        setPadding(px(60), px(28), px(60), px(16));
+        setPadding(0, top, 0, bottom);
         setClipChildren(false);
+        setClipToPadding(false);
         setFocusable(false);
         setBackground(new GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[] {0xFA202633, 0xFA10131B}));
+                GradientDrawable.Orientation.TL_BR,
+                new int[] {BG_TOP, BG_BOTTOM}));
 
-        TextView heading = text("Tus aplicaciones", 35, Color.WHITE);
-        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        addView(heading, new LayoutParams(
-                LayoutParams.MATCH_PARENT, px(54)));
-
-        for (int i = 0; i < HEADINGS.length; i++) {
+        for (int i = 0; i < ROWS; i++) {
             Row row = new Row(i);
             rows.add(row);
-            addView(row.root, new LayoutParams(
-                    LayoutParams.MATCH_PARENT, px(219)));
+            addView(row.scroll, new LayoutParams(
+                    LayoutParams.MATCH_PARENT, rowH));
         }
-
-        TextView help = text(
-                "← → Explorar   ·   ↑ Panel / fila anterior"
-                + "   ·   ↓ Fila siguiente   ·   Atrás: panel",
-                19, 0xFFADB5C4);
-        help.setGravity(Gravity.CENTER);
-        addView(help, new LayoutParams(
-                LayoutParams.MATCH_PARENT, px(34)));
     }
 
     private int px(float value) {
@@ -179,6 +235,14 @@ final class AppContentPage extends LinearLayout {
         return view;
     }
 
+    private GradientDrawable ringDrawable() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.TRANSPARENT);
+        drawable.setCornerRadius(radius + inset);
+        drawable.setStroke(Math.max(2, px(3)), RING_COLOR);
+        return drawable;
+    }
+
     void start() {
         if (active || destroyed) return;
         active = true;
@@ -191,6 +255,7 @@ final class AppContentPage extends LinearLayout {
         active = false;
         okPressed = false;
         main.removeCallbacks(refresh);
+        for (Row row : rows) row.cancelScroll();
     }
 
     void destroyPage() {
@@ -205,6 +270,7 @@ final class AppContentPage extends LinearLayout {
         imageFailures.clear();
 
         for (Row row : rows) {
+            row.cancelScroll();
             for (ImageView image : row.images) {
                 image.setImageDrawable(null);
             }
@@ -223,8 +289,38 @@ final class AppContentPage extends LinearLayout {
         selectRow(selectedRow);
     }
 
+    /** Fila con contenido más cercana a {@code from}, o -1 si no hay. */
+    private int nearestFilled(int from) {
+        for (int d = 0; d < rows.size(); d++) {
+            int a = from + d;
+            int b = from - d;
+            if (a >= 0 && a < rows.size() && rows.get(a).hasContent()) {
+                return a;
+            }
+            if (b >= 0 && b < rows.size() && rows.get(b).hasContent()) {
+                return b;
+            }
+        }
+        return -1;
+    }
+
+    /** Siguiente fila con contenido en la dirección dada, o -1. */
+    private int filledFrom(int start, int step) {
+        for (int i = start + step; i >= 0 && i < rows.size(); i += step) {
+            if (rows.get(i).hasContent()) return i;
+        }
+        return -1;
+    }
+
     private void selectRow(int index) {
-        selectedRow = Math.max(0, Math.min(rows.size() - 1, index));
+        int target = nearestFilled(Math.max(0, Math.min(rows.size() - 1, index)));
+        if (target < 0) {
+            // Aún sin datos: se enfoca cuando lleguen.
+            pendingFocus = true;
+            return;
+        }
+        pendingFocus = false;
+        selectedRow = target;
         rows.get(selectedRow).focusSelected();
     }
 
@@ -252,13 +348,15 @@ final class AppContentPage extends LinearLayout {
                 if (down) {
                     okPressed = false;
                     if (code == KeyEvent.KEYCODE_DPAD_UP) {
-                        if (selectedRow == 0) {
+                        int previous = filledFrom(selectedRow, -1);
+                        if (previous < 0) {
                             navigation.toPreviousPage();
                         } else {
-                            selectRow(selectedRow - 1);
+                            selectRow(previous);
                         }
-                    } else if (selectedRow < rows.size() - 1) {
-                        selectRow(selectedRow + 1);
+                    } else {
+                        int next = filledFrom(selectedRow, 1);
+                        if (next >= 0) selectRow(next);
                     }
                 }
                 return true;
@@ -283,7 +381,6 @@ final class AppContentPage extends LinearLayout {
 
     private final class Row {
         final int index;
-        final LinearLayout root;
         final HorizontalScrollView scroll;
         final LinearLayout strip;
         final List<View> cards = new ArrayList<>();
@@ -292,61 +389,75 @@ final class AppContentPage extends LinearLayout {
         List<Entry> entries = new ArrayList<>();
         String signature = "";
         int selected;
+        boolean skeleton;
+
+        private ValueAnimator scrollAnim;
+        private int goalX;
 
         Row(int index) {
             this.index = index;
 
-            root = new LinearLayout(activity);
-            root.setOrientation(VERTICAL);
-            root.setClipChildren(false);
-
-            TextView title = text(HEADINGS[index], 25, 0xFFF5F5F7);
-            title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            root.addView(title, new LayoutParams(
-                    LayoutParams.MATCH_PARENT, px(35)));
-
             scroll = new HorizontalScrollView(activity);
             scroll.setHorizontalScrollBarEnabled(false);
+            scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
             scroll.setFillViewport(false);
-            scroll.setSmoothScrollingEnabled(true);
             scroll.setClipToPadding(false);
-            scroll.setPadding(px(7), px(7), px(7), px(7));
+            scroll.setClipChildren(false);
+            scroll.setFocusable(false);
+            scroll.setPadding(0, vPad, 0, vPad);
 
             strip = new LinearLayout(activity);
             strip.setOrientation(HORIZONTAL);
             strip.setClipChildren(false);
+            strip.setPadding(stripPad, 0, margin, 0);
 
             scroll.addView(strip, new FrameLayout.LayoutParams(
-                    LayoutParams.WRAP_CONTENT,
-                    LayoutParams.MATCH_PARENT));
-
-            root.addView(scroll, new LayoutParams(
-                    LayoutParams.MATCH_PARENT, px(179)));
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
 
             scroll.setOnScrollChangeListener(
                     (view, x, y, oldX, oldY) -> syncImages());
 
-            showEmpty("Cargando…");
+            showSkeleton();
         }
 
-        void showEmpty(String message) {
+        boolean hasContent() {
+            return !entries.isEmpty() && !skeleton;
+        }
+
+        void cancelScroll() {
+            if (scrollAnim != null) {
+                scrollAnim.cancel();
+                scrollAnim = null;
+            }
+        }
+
+        /** Cartillas grises sin texto: filas sin datos o cargando. */
+        void showSkeleton() {
+            cancelScroll();
             strip.removeAllViews();
             cards.clear();
             images.clear();
+            skeleton = true;
 
-            TextView empty = text(message, 23, 0xFFB8C0CF);
-            empty.setPadding(px(18), 0, px(18), 0);
-            empty.setFocusable(true);
-            empty.setBackground(background(false));
-            empty.setContentDescription(
-                    HEADINGS[index] + ". " + message);
-            empty.setOnFocusChangeListener((view, focused) -> {
-                if (focused) selectedRow = index;
-                view.setBackground(background(focused));
-            });
+            int count = (int) Math.ceil(VISIBLE_CARDS);
+            for (int i = 0; i < count; i++) {
+                FrameLayout cell = new FrameLayout(activity);
+                cell.setFocusable(false);
 
-            strip.addView(empty, new LayoutParams(px(900), px(160)));
-            cards.add(empty);
+                View box = new View(activity);
+                box.setBackgroundColor(SKELETON);
+                box.setClipToOutline(true);
+                box.setOutlineProvider(rounded);
+
+                FrameLayout.LayoutParams boxParams =
+                        new FrameLayout.LayoutParams(imgW, imgH);
+                boxParams.leftMargin = inset;
+                boxParams.topMargin = inset;
+                cell.addView(box, boxParams);
+
+                strip.addView(cell, new LayoutParams(cellW, cellH));
+            }
         }
 
         void bind(List<Entry> next) {
@@ -362,10 +473,7 @@ final class AppContentPage extends LinearLayout {
 
             String newSignature = mark.toString();
             if (newSignature.equals(signature)
-                    && (!entries.isEmpty() || cards.size() == 1)) {
-                if (next.isEmpty()) {
-                    showEmpty("Sin contenido disponible");
-                }
+                    && (!entries.isEmpty() || skeleton)) {
                 return;
             }
 
@@ -373,7 +481,7 @@ final class AppContentPage extends LinearLayout {
                     ? null
                     : entries.get(Math.min(selected, entries.size() - 1))
                             .key();
-            boolean hadFocus = root.hasFocus();
+            boolean hadFocus = scroll.hasFocus();
 
             signature = newSignature;
             entries = next;
@@ -386,15 +494,18 @@ final class AppContentPage extends LinearLayout {
                 }
             }
 
+            if (entries.isEmpty()) {
+                showSkeleton();
+                scroll.scrollTo(0, 0);
+                if (hadFocus) main.post(AppContentPage.this::restoreFocus);
+                return;
+            }
+
+            cancelScroll();
             strip.removeAllViews();
             cards.clear();
             images.clear();
-
-            if (entries.isEmpty()) {
-                showEmpty("Sin contenido disponible");
-                if (hadFocus) focusSelected();
-                return;
-            }
+            skeleton = false;
 
             for (int i = 0; i < entries.size(); i++) {
                 addCard(entries.get(i), i);
@@ -408,73 +519,82 @@ final class AppContentPage extends LinearLayout {
         }
 
         private void addCard(Entry entry, int positionInRow) {
-            FrameLayout card = new FrameLayout(activity);
-            card.setFocusable(true);
-            card.setClickable(true);
-            card.setClipToOutline(true);
-            card.setBackground(background(false));
+            FrameLayout cell = new FrameLayout(activity);
+            cell.setFocusable(true);
+            cell.setClickable(true);
+            cell.setClipChildren(false);
+            // La escala se hace alrededor del centro de la imagen,
+            // no del nombre que hay debajo.
+            cell.setPivotX(cellW / 2f);
+            cell.setPivotY(ringH / 2f);
+
+            // Aro de foco (oculto hasta recibir foco).
+            View ring = new View(activity);
+            ring.setBackground(ringDrawable());
+            ring.setAlpha(0f);
+            cell.addView(ring, new FrameLayout.LayoutParams(cellW, ringH));
+
+            // Imagen con esquinas redondeadas.
+            FrameLayout box = new FrameLayout(activity);
+            box.setBackgroundColor(PLACEHOLDER);
+            box.setClipToOutline(true);
+            box.setOutlineProvider(rounded);
 
             ImageView image = new ImageView(activity);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            image.setBackgroundColor(0xFF303746);
             image.setImportantForAccessibility(
                     View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-
-            card.addView(image, new FrameLayout.LayoutParams(
-                    LayoutParams.MATCH_PARENT, px(118)));
-
-            TextView label = text(entry.title, 21, Color.WHITE);
-            label.setPadding(px(9), 0, px(9), 0);
-            FrameLayout.LayoutParams labelParams =
-                    new FrameLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, px(27));
-            labelParams.topMargin = px(119);
-            card.addView(label, labelParams);
-
-            TextView detail = text(entry.subtitle, 16, 0xFFC5CDDA);
-            detail.setPadding(px(9), 0, px(9), 0);
-            FrameLayout.LayoutParams detailParams =
-                    new FrameLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, px(20));
-            detailParams.topMargin = px(145);
-            card.addView(detail, detailParams);
+            box.addView(image, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
 
             if (entry.duration > 0
                     && entry.position > 0
                     && entry.position < entry.duration) {
-                ProgressBar progress = new ProgressBar(
-                        activity, null,
-                        android.R.attr.progressBarStyleHorizontal);
-                progress.setMax(1000);
-                progress.setProgress((int) Math.min(
-                        1000, entry.position * 1000.0 / entry.duration));
-                progress.setProgressTintList(
-                        android.content.res.ColorStateList.valueOf(
-                                0xFF79BFFF));
+                int barH = px(5);
 
-                FrameLayout.LayoutParams progressParams =
+                View track = new View(activity);
+                track.setBackgroundColor(0x66000000);
+                FrameLayout.LayoutParams trackParams =
                         new FrameLayout.LayoutParams(
-                                LayoutParams.MATCH_PARENT, px(5));
-                progressParams.topMargin = px(113);
-                card.addView(progress, progressParams);
+                                ViewGroup.LayoutParams.MATCH_PARENT, barH);
+                trackParams.gravity = Gravity.BOTTOM;
+                box.addView(track, trackParams);
+
+                View fill = new View(activity);
+                fill.setBackgroundColor(0xFFF5F5F7);
+                int fillW = Math.max(1, Math.round(imgW
+                        * (float) (entry.position
+                                / (double) entry.duration)));
+                FrameLayout.LayoutParams fillParams =
+                        new FrameLayout.LayoutParams(fillW, barH);
+                fillParams.gravity = Gravity.BOTTOM | Gravity.START;
+                box.addView(fill, fillParams);
             }
 
-            card.setContentDescription(
+            FrameLayout.LayoutParams boxParams =
+                    new FrameLayout.LayoutParams(imgW, imgH);
+            boxParams.leftMargin = inset;
+            boxParams.topMargin = inset;
+            cell.addView(box, boxParams);
+
+            // Nombre: solo visible con la cartilla seleccionada.
+            TextView caption = text(entry.title, 21, Color.WHITE);
+            caption.setTypeface(
+                    Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            caption.setPadding(inset + px(4), 0, inset, 0);
+            caption.setAlpha(0f);
+            FrameLayout.LayoutParams captionParams =
+                    new FrameLayout.LayoutParams(cellW, captionH);
+            captionParams.topMargin = ringH;
+            cell.addView(caption, captionParams);
+
+            cell.setContentDescription(
                     entry.title + ". " + entry.subtitle);
-            card.setOnClickListener(view -> open(entry));
+            cell.setOnClickListener(view -> open(entry));
 
-            card.setOnFocusChangeListener((view, focused) -> {
-                view.animate().cancel();
-                view.animate()
-                    .scaleX(focused ? 1.025f : 1f)
-                    .scaleY(focused ? 1.025f : 1f)
-                    .setDuration(170)
-                    .setInterpolator(
-                        new android.view.animation
-                                .AccelerateDecelerateInterpolator())
-                    .start();
-                view.setBackground(background(focused));
-
+            cell.setOnFocusChangeListener((view, focused) -> {
+                animateFocus(cell, ring, caption, focused);
                 if (focused) {
                     selectedRow = index;
                     selected = positionInRow;
@@ -482,47 +602,112 @@ final class AppContentPage extends LinearLayout {
                 }
             });
 
-            LayoutParams params = new LayoutParams(px(300), px(165));
-            params.rightMargin = px(20);
-            strip.addView(card, params);
-            cards.add(card);
+            strip.addView(cell, new LayoutParams(cellW, cellH));
+            cards.add(cell);
             images.add(image);
         }
 
+        private void animateFocus(View cell, View ring, View caption,
+                boolean focused) {
+            long duration = focused ? FOCUS_IN_MS : FOCUS_OUT_MS;
+            float s = focused ? FOCUS_SCALE : 1f;
+
+            cell.animate().cancel();
+            cell.animate()
+                .scaleX(s)
+                .scaleY(s)
+                .translationZ(focused ? px(10) : 0f)
+                .setDuration(duration)
+                .setInterpolator(ease)
+                .start();
+
+            ring.animate().cancel();
+            ring.animate()
+                .alpha(focused ? 1f : 0f)
+                .setDuration(duration)
+                .setInterpolator(ease)
+                .start();
+
+            caption.animate().cancel();
+            caption.animate()
+                .alpha(focused ? 1f : 0f)
+                .setDuration(duration)
+                .setInterpolator(ease)
+                .start();
+        }
+
         void move(int direction) {
-            if (entries.isEmpty()) return;
+            if (!hasContent()) return;
             selected = Math.max(
                     0, Math.min(entries.size() - 1, selected + direction));
             focusSelected();
         }
 
         void focusSelected() {
-            if (cards.isEmpty()) return;
+            if (!hasContent() || cards.isEmpty()) return;
             int at = Math.min(selected, cards.size() - 1);
             cards.get(at).requestFocus();
             revealSelected();
         }
 
         void activate() {
-            if (!entries.isEmpty() && selected < cards.size()) {
+            if (hasContent() && selected < cards.size()) {
                 cards.get(selected).performClick();
             }
         }
 
+        private int currentGoal() {
+            return scrollAnim != null && scrollAnim.isRunning()
+                    ? goalX
+                    : scroll.getScrollX();
+        }
+
+        private void animateScrollTo(int target) {
+            int from;
+            if (scrollAnim != null) {
+                scrollAnim.cancel();
+                scrollAnim = null;
+            }
+            from = scroll.getScrollX();
+            goalX = target;
+            if (from == target) return;
+
+            scrollAnim = ValueAnimator.ofInt(from, target);
+            scrollAnim.setDuration(SCROLL_MS);
+            scrollAnim.setInterpolator(ease);
+            scrollAnim.addUpdateListener(animation ->
+                    scroll.scrollTo((Integer) animation.getAnimatedValue(), 0));
+            scrollAnim.start();
+        }
+
+        /**
+         * Mantiene la cartilla seleccionada visible y, cuando hay más
+         * a la derecha, deja asomar media cartilla (4.5 visibles).
+         */
         private void revealSelected() {
-            if (cards.isEmpty()) return;
-            View card = cards.get(Math.min(selected, cards.size() - 1));
-            int left = card.getLeft();
-            int right = card.getRight();
+            if (cards.isEmpty() || !hasContent()) return;
             int viewport = scroll.getWidth();
             if (viewport <= 0) return;
 
-            int x = scroll.getScrollX();
-            if (left < x + px(10)) {
-                scroll.smoothScrollTo(Math.max(0, left - px(10)), 0);
-            } else if (right > x + viewport - px(20)) {
-                scroll.smoothScrollTo(right - viewport + px(20), 0);
+            View card = cards.get(Math.min(selected, cards.size() - 1));
+            int left = card.getLeft();
+            int right = card.getRight();
+            int half = cellW / 2;
+
+            int x = currentGoal();
+            int target = x;
+
+            if (left < x + stripPad) {
+                target = left - stripPad;
+            } else if (right > x + viewport - half) {
+                target = right + half - viewport;
             }
+
+            int maxX = Math.max(0, strip.getWidth() - viewport);
+            if (strip.getWidth() > 0) target = Math.min(target, maxX);
+            target = Math.max(0, target);
+
+            if (target != x) animateScrollTo(target);
             syncImages();
         }
 
@@ -531,15 +716,15 @@ final class AppContentPage extends LinearLayout {
          * vecina a cada lado.
          */
         void syncImages() {
-            if (!active || destroyed || images.isEmpty()) return;
+            if (!active || destroyed || images.isEmpty()
+                    || entries.size() != images.size()) return;
 
-            int stride = px(320);
-            int start = Math.max(0, scroll.getScrollX() / stride - 1);
+            int start = Math.max(0, scroll.getScrollX() / cellW - 1);
             int end = Math.min(
                     images.size() - 1,
                     (scroll.getScrollX()
                             + Math.max(scroll.getWidth(), px(900)))
-                            / stride + 1);
+                            / cellW + 1);
 
             for (int i = 0; i < images.size(); i++) {
                 ImageView view = images.get(i);
@@ -556,20 +741,18 @@ final class AppContentPage extends LinearLayout {
                 if (bitmap != null) {
                     view.setImageBitmap(bitmap);
                     view.setTag(entry.image);
+                    view.animate().cancel();
+                    view.setAlpha(0f);
+                    view.animate()
+                        .alpha(1f)
+                        .setDuration(IMAGE_FADE_MS)
+                        .setInterpolator(ease)
+                        .start();
                 } else {
                     requestImage(entry.image);
                 }
             }
         }
-    }
-
-    private GradientDrawable background(boolean focused) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(focused ? 0xFF34465F : 0xFF262E3D);
-        drawable.setCornerRadius(px(12));
-        drawable.setStroke(px(focused ? 2 : 1),
-                focused ? 0xFFF5F5F7 : 0xFF414B5D);
-        return drawable;
     }
 
     private void loadData() {
@@ -601,6 +784,8 @@ final class AppContentPage extends LinearLayout {
                     rows.get(i).bind(ready.get(i));
                     rows.get(i).syncImages();
                 }
+
+                if (pendingFocus) selectRow(selectedRow);
             });
         });
     }
@@ -722,10 +907,11 @@ final class AppContentPage extends LinearLayout {
         entry.pkg = value(cursor, "package_name");
         entry.title = value(cursor, "title");
         entry.intent = value(cursor, "intent_uri");
-        entry.image = value(cursor, "poster_art_uri");
 
+        // Las cartillas son horizontales: se prefiere la miniatura.
+        entry.image = value(cursor, "thumbnail_uri");
         if (entry.image.isEmpty()) {
-            entry.image = value(cursor, "thumbnail_uri");
+            entry.image = value(cursor, "poster_art_uri");
         }
         if (entry.title.isEmpty() || entry.intent.isEmpty()) return null;
 
