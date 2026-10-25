@@ -22,7 +22,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.animation.Interpolator;
-import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -49,8 +48,9 @@ import java.util.concurrent.Executors;
  * Página 3: canales publicados por las aplicaciones.
  * Solo lectura: no modifica las listas ni el historial de las apps.
  *
- * Mismo lenguaje visual que las páginas 1 y 2: carruseles de 4.5
- * cartillas, aro blanco en la seleccionada y nombre solo al enfocar.
+ * Mismo lenguaje visual que las páginas 1 y 2: fondo transparente (se ve el
+ * mismo cielo de HomeView), carruseles de 4.5 cartillas, aro en la seleccionada
+ * y nombre solo al enfocar. Los colores siguen el día/noche de HomeView.
  *
  * Arriba desde la primera fila con contenido regresa al panel anterior.
  * Abajo desde la última fila permanece en esta página.
@@ -73,21 +73,21 @@ final class AppContentPage extends LinearLayout {
         "Netflix: Destacados"
     };
 
-    // ---- Estilo (ajustable) ----
+    // ---- Estilo (mismos valores que HomeView) ----
     private static final int ROWS = 4;
     private static final float VISIBLE_CARDS = 4.5f;
-    private static final float FOCUS_SCALE = 1.06f;
-    private static final long FOCUS_IN_MS = 240;
-    private static final long FOCUS_OUT_MS = 180;
-    private static final long SCROLL_MS = 280;
+    private static final float FOCUS_SCALE = 1.05f;
+    private static final long FOCUS_MS = 200;
+    private static final long SCROLL_MS = 240;
     private static final long IMAGE_FADE_MS = 200;
-    private static final int RING_COLOR = 0xE6FFFFFF;
-    private static final int PLACEHOLDER = 0xFF2A2E3A;
-    private static final int SKELETON = 0x802A2E3A;
-    private static final int BG_TOP = 0xFF262833;
-    private static final int BG_BOTTOM = 0xFF12131A;
+    private static final int INK_LIGHT = 0xFF1D1D1F;   // L_INK
+    private static final int INK_NIGHT = 0xFFF5F5F7;   // WHITE
+    private static final int HOLDER_LIGHT = 0xFFDADADF;
+    private static final int HOLDER_NIGHT = 0xFF2C2C2E;
+    private static final int RING_ALPHA = 0xE6;
 
-    private final Interpolator ease = new PathInterpolator(0.2f, 0f, 0f, 1f);
+    // Misma curva que RecommendationMotion.ease en HomeView.
+    private final Interpolator ease = t -> t * t * (3 - 2 * t);
 
     private final Activity activity;
     private final Navigation navigation;
@@ -117,6 +117,7 @@ final class AppContentPage extends LinearLayout {
     private final int stripPad;
     private final int inset;
     private final int radius;
+    private final int ringStroke;
     private final int captionH;
     private final int vPad;
     private final int cellW;
@@ -125,6 +126,11 @@ final class AppContentPage extends LinearLayout {
     private final int imgH;
     private final int ringH;
     private final ViewOutlineProvider rounded;
+
+    // Tono día/noche (lo fija HomeView).
+    private float tone;
+    private int ink = INK_LIGHT;
+    private int holder = HOLDER_LIGHT;
 
     private boolean active;
     private boolean destroyed;
@@ -175,9 +181,10 @@ final class AppContentPage extends LinearLayout {
         int height = metrics.heightPixels;
         scale = Math.max(0.3f, width / 1920f);
 
-        margin = px(60);
+        margin = px(80);                       // MARGIN de HomeView
         inset = px(8);
-        radius = px(18);
+        radius = px(18);                       // esquinas de las tarjetas
+        ringStroke = Math.max(2, Math.round(2.5f * scale));
         captionH = px(32);
         vPad = px(8);
         stripPad = margin - inset;
@@ -207,9 +214,7 @@ final class AppContentPage extends LinearLayout {
         setClipChildren(false);
         setClipToPadding(false);
         setFocusable(false);
-        setBackground(new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[] {BG_TOP, BG_BOTTOM}));
+        // Sin fondo propio: se ve el cielo de HomeView, como en la página 2.
 
         for (int i = 0; i < ROWS; i++) {
             Row row = new Row(i);
@@ -217,6 +222,12 @@ final class AppContentPage extends LinearLayout {
             addView(row.scroll, new LayoutParams(
                     LayoutParams.MATCH_PARENT, rowH));
         }
+    }
+
+    /** Sin fondo ni superposiciones: el fundido no necesita capa aparte. */
+    @Override
+    public boolean hasOverlappingRendering() {
+        return false;
     }
 
     private int px(float value) {
@@ -239,8 +250,32 @@ final class AppContentPage extends LinearLayout {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(Color.TRANSPARENT);
         drawable.setCornerRadius(radius + inset);
-        drawable.setStroke(Math.max(2, px(3)), RING_COLOR);
+        drawable.setStroke(ringStroke, Ui.alpha(ink, RING_ALPHA / 255f));
         return drawable;
+    }
+
+    private int skeletonColor() {
+        return (holder & 0x00FFFFFF) | 0x99000000;
+    }
+
+    private static int mix(int a, int b, float f) {
+        int r = Math.round(((a >> 16) & 255) * (1 - f) + ((b >> 16) & 255) * f);
+        int g = Math.round(((a >> 8) & 255) * (1 - f) + ((b >> 8) & 255) * f);
+        int bl = Math.round((a & 255) * (1 - f) + (b & 255) * f);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    /**
+     * 0 = día, 1 = noche (el mismo valor que usa HomeView).
+     * Se redondea a 32 pasos para no repintar todas las tarjetas en cada fotograma.
+     */
+    void setNight(float night) {
+        float q = Math.round(Ui.clamp(night) * 32f) / 32f;
+        if (q == tone) return;
+        tone = q;
+        ink = mix(INK_LIGHT, INK_NIGHT, q);
+        holder = mix(HOLDER_LIGHT, HOLDER_NIGHT, q);
+        for (Row row : rows) row.applyTone();
     }
 
     void start() {
@@ -313,7 +348,8 @@ final class AppContentPage extends LinearLayout {
     }
 
     private void selectRow(int index) {
-        int target = nearestFilled(Math.max(0, Math.min(rows.size() - 1, index)));
+        int target = nearestFilled(
+                Math.max(0, Math.min(rows.size() - 1, index)));
         if (target < 0) {
             // Aún sin datos: se enfoca cuando lleguen.
             pendingFocus = true;
@@ -385,6 +421,10 @@ final class AppContentPage extends LinearLayout {
         final LinearLayout strip;
         final List<View> cards = new ArrayList<>();
         final List<ImageView> images = new ArrayList<>();
+        final List<TextView> captions = new ArrayList<>();
+        final List<View> rings = new ArrayList<>();
+        final List<View> boxes = new ArrayList<>();
+        final List<View> skeletons = new ArrayList<>();
 
         List<Entry> entries = new ArrayList<>();
         String signature = "";
@@ -405,6 +445,7 @@ final class AppContentPage extends LinearLayout {
             scroll.setClipChildren(false);
             scroll.setFocusable(false);
             scroll.setPadding(0, vPad, 0, vPad);
+            scroll.setContentDescription(HEADINGS[index]);
 
             strip = new LinearLayout(activity);
             strip.setOrientation(HORIZONTAL);
@@ -432,12 +473,28 @@ final class AppContentPage extends LinearLayout {
             }
         }
 
-        /** Cartillas grises sin texto: filas sin datos o cargando. */
-        void showSkeleton() {
+        private void clearCards() {
             cancelScroll();
             strip.removeAllViews();
             cards.clear();
             images.clear();
+            captions.clear();
+            rings.clear();
+            boxes.clear();
+            skeletons.clear();
+        }
+
+        /** Repinta los colores que dependen del día/noche. */
+        void applyTone() {
+            for (TextView t : captions) t.setTextColor(ink);
+            for (View v : rings) v.setBackground(ringDrawable());
+            for (View v : boxes) v.setBackgroundColor(holder);
+            for (View v : skeletons) v.setBackgroundColor(skeletonColor());
+        }
+
+        /** Cartillas vacías sin texto: filas sin datos o cargando. */
+        void showSkeleton() {
+            clearCards();
             skeleton = true;
 
             int count = (int) Math.ceil(VISIBLE_CARDS);
@@ -446,9 +503,10 @@ final class AppContentPage extends LinearLayout {
                 cell.setFocusable(false);
 
                 View box = new View(activity);
-                box.setBackgroundColor(SKELETON);
+                box.setBackgroundColor(skeletonColor());
                 box.setClipToOutline(true);
                 box.setOutlineProvider(rounded);
+                skeletons.add(box);
 
                 FrameLayout.LayoutParams boxParams =
                         new FrameLayout.LayoutParams(imgW, imgH);
@@ -501,10 +559,7 @@ final class AppContentPage extends LinearLayout {
                 return;
             }
 
-            cancelScroll();
-            strip.removeAllViews();
-            cards.clear();
-            images.clear();
+            clearCards();
             skeleton = false;
 
             for (int i = 0; i < entries.size(); i++) {
@@ -533,12 +588,14 @@ final class AppContentPage extends LinearLayout {
             ring.setBackground(ringDrawable());
             ring.setAlpha(0f);
             cell.addView(ring, new FrameLayout.LayoutParams(cellW, ringH));
+            rings.add(ring);
 
             // Imagen con esquinas redondeadas.
             FrameLayout box = new FrameLayout(activity);
-            box.setBackgroundColor(PLACEHOLDER);
+            box.setBackgroundColor(holder);
             box.setClipToOutline(true);
             box.setOutlineProvider(rounded);
+            boxes.add(box);
 
             ImageView image = new ImageView(activity);
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -579,7 +636,7 @@ final class AppContentPage extends LinearLayout {
             cell.addView(box, boxParams);
 
             // Nombre: solo visible con la cartilla seleccionada.
-            TextView caption = text(entry.title, 21, Color.WHITE);
+            TextView caption = text(entry.title, 21, ink);
             caption.setTypeface(
                     Typeface.create("sans-serif-medium", Typeface.NORMAL));
             caption.setPadding(inset + px(4), 0, inset, 0);
@@ -588,6 +645,7 @@ final class AppContentPage extends LinearLayout {
                     new FrameLayout.LayoutParams(cellW, captionH);
             captionParams.topMargin = ringH;
             cell.addView(caption, captionParams);
+            captions.add(caption);
 
             cell.setContentDescription(
                     entry.title + ". " + entry.subtitle);
@@ -609,29 +667,27 @@ final class AppContentPage extends LinearLayout {
 
         private void animateFocus(View cell, View ring, View caption,
                 boolean focused) {
-            long duration = focused ? FOCUS_IN_MS : FOCUS_OUT_MS;
             float s = focused ? FOCUS_SCALE : 1f;
 
             cell.animate().cancel();
             cell.animate()
                 .scaleX(s)
                 .scaleY(s)
-                .translationZ(focused ? px(10) : 0f)
-                .setDuration(duration)
+                .setDuration(FOCUS_MS)
                 .setInterpolator(ease)
                 .start();
 
             ring.animate().cancel();
             ring.animate()
                 .alpha(focused ? 1f : 0f)
-                .setDuration(duration)
+                .setDuration(FOCUS_MS)
                 .setInterpolator(ease)
                 .start();
 
             caption.animate().cancel();
             caption.animate()
                 .alpha(focused ? 1f : 0f)
-                .setDuration(duration)
+                .setDuration(FOCUS_MS)
                 .setInterpolator(ease)
                 .start();
         }
@@ -663,12 +719,11 @@ final class AppContentPage extends LinearLayout {
         }
 
         private void animateScrollTo(int target) {
-            int from;
             if (scrollAnim != null) {
                 scrollAnim.cancel();
                 scrollAnim = null;
             }
-            from = scroll.getScrollX();
+            int from = scroll.getScrollX();
             goalX = target;
             if (from == target) return;
 
