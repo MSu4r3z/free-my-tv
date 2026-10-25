@@ -117,6 +117,8 @@ final class HomeView extends ViewGroup
     private int zone = Z_SHELF;
 
     private static final long NIGHT_MS = 2000;
+                private static final long TOGGLE_MS = 700;
+    private long nightMs = NIGHT_MS;
     private boolean nightTarget;
     private float night, nightFrom;
     private long nightAt;
@@ -375,11 +377,22 @@ final class HomeView extends ViewGroup
             addView(v);
         }
 
-        appContentPage = new AppContentPage(
+     appContentPage = new AppContentPage(
                 a, new AppContentPage.Navigation() {
                     @Override
                     public void toPreviousPage() {
                         closeAppPage();
+                        click.move();
+                    }
+
+                    @Override
+                    public void moved() {
+                        click.move();
+                    }
+
+                    @Override
+                    public void opened() {
+                        click.open();
                     }
                 });
         appContentPage.setVisibility(INVISIBLE);
@@ -708,7 +721,7 @@ final class HomeView extends ViewGroup
         if (drawerItemsMoving || drawerDirty || bgFading) drawerLayer.invalidate();
         if (gridMoving || gridDirty) sheetLayer.invalidate();
         if (drawerMoving || bgFading) sky.invalidate();
-        if (bgFading || (drawerWasMoving && !drawerMoving)) platter.invalidate();
+        if (bgFading || drawerMoving || (drawerWasMoving && !drawerMoving)) platter.invalidate();
         drawerWasMoving = drawerMoving;
         tilesDirty = statusDirty = heroDirty = drawerDirty = gridDirty = motionDirty = false;
 
@@ -935,12 +948,26 @@ final class HomeView extends ViewGroup
     }
 
     private void checkNight(boolean animate) {
-        boolean want = data.isNight(System.currentTimeMillis());
+        long now = System.currentTimeMillis();
+        boolean auto = data.isNight(now);
+        boolean want = auto;
+        // Modo elegido con el botón: vale hasta el próximo amanecer/atardecer.
+        int forced = ui.getInt("themeForce", -1);
+        if (forced >= 0) {
+            long age = now - ui.getLong("themeAt", 0);
+            if (auto != ui.getBoolean("themeBase", auto)
+                    || age < 0 || age > 20 * 3600_000L) {
+                ui.edit().remove("themeForce").apply();
+            } else {
+                want = forced == 1;
+            }
+        }
         if (want == nightTarget) return;
         nightTarget = want;
         if (animate && running) {
             nightFrom = night;
             nightAt = SystemClock.uptimeMillis();
+            nightMs = NIGHT_MS;
         } else {
             night = want ? 1 : 0;
             nightAt = 0;
@@ -950,7 +977,9 @@ final class HomeView extends ViewGroup
 
     private boolean tickNight(long up) {
         if (nightAt == 0) return false;
-        float t = Ui.clamp((up - nightAt) / NIGHT_MS), to = nightTarget ? 1 : 0;
+        // Antes dividía long entre long (0 o 1): el cambio era un corte brusco.
+        float t = Ui.clamp((up - nightAt) / (float) nightMs),
+                to = nightTarget ? 1 : 0;
         night = nightFrom + (to - nightFrom) * t * t * (3 - 2 * t);
         if (t >= 1) {
             night = to;
@@ -958,6 +987,33 @@ final class HomeView extends ViewGroup
         }
         nightChanged();
         return true;
+    }
+                /** Botón de la esquina: cambia entre modo día y modo noche. */
+    private void toggleTheme() {
+        long now = System.currentTimeMillis();
+        ui.edit()
+                .putInt("themeForce", nightTarget ? 0 : 1)
+                .putBoolean("themeBase", data.isNight(now))
+                .putLong("themeAt", now)
+                .apply();
+        checkNight(true);
+        if (nightAt != 0) nightMs = TOGGLE_MS;
+        statusDirty = true;
+        wake();
+    }
+
+    private String lightSymbol(int i) {
+        if (i == 0) return nightTarget ? "sunny" : "clear_night";
+        return lightButtons.get(i).symbol;
+    }
+
+    private String lightLabel(int i) {
+        if (i == 0) {
+            return nightTarget
+                    ? Ui.tr("Modo Dia", "Day Mode", "Modo Día")
+                    : Ui.tr("Modo Noite", "Night Mode", "Modo Noche");
+        }
+        return lightButtons.get(i).label;
     }
 
     private void nightChanged() {
@@ -1204,6 +1260,24 @@ final class HomeView extends ViewGroup
         crispLogos.clear();
     }
 
+private float veiledAlpha;
+
+    /**
+     * Tinte que lleva incluido el velo que drawLightSky pone sobre la foto en
+     * la página 2; así la barra de apps coincide con el fondo de cada página.
+     */
+    private int veiledTint(int tint, float alpha) {
+        float a = tone(0.32f, 0.42f) * Ui.clamp(drawer.value);
+        if (a <= 0.002f) {
+            veiledAlpha = alpha;
+            return tint;
+        }
+        float total = alpha + a * (1 - alpha);
+        veiledAlpha = total;
+        return blend(tint, blend(0xFFFFFFFF, 0xFF000000, night),
+                a * (1 - alpha) / total);
+    }
+
     private void drawPlatter(Canvas c) {
         if (shelf.isEmpty()) return;
         float radius = (TILE_RADIUS + SHELF_PAD) * k;
@@ -1211,9 +1285,10 @@ final class HomeView extends ViewGroup
         tmp.offset(0, 18 * k);
         shadow.setColor(tone(0x1F000000, 0x52000000));
         shadows.draw(c, tmp, radius, SHADOW_BLUR * k, shadow);
+        int tint = veiledTint(tone(0xFFFFFFFF, SMOKE), tone(0.42f, 0.12f));
         scene.liquid(
-                c, platterRect, radius, tone(0xFFFFFFFF, SMOKE),
-                tone(0.42f, 0.12f), tone(0.03f, 0.08f),
+                c, platterRect, radius, tint,
+                veiledAlpha, tone(0.03f, 0.08f),
                 tone(30, 34) * k, tone(22, 28) * k, tone(0.65f, 0.95f), 1);
     }
 
@@ -2363,9 +2438,14 @@ final class HomeView extends ViewGroup
             if (drawerItems.isEmpty()) return;
             it = drawerItems.get(drawerIndex);
             r = drawerRects[drawerIndex];
-        } else if (zone == Z_TOP) {
+     } else if (zone == Z_TOP) {
             if (topIndex < 3) {
                 selectTab(topIndex);
+                return;
+            }
+            if (topIndex == 3) {
+                click.open();
+                toggleTheme();
                 return;
             }
             it = lightButtons.get(topIndex - 3);
@@ -2610,7 +2690,7 @@ final class HomeView extends ViewGroup
                 return label(others, i) + ", " + (i + 1)
                         + Ui.tr(" de ", " of ") + others.size();
             case Z_TOP:
-                if (i >= 3) return label(lightButtons, i - 3);
+                if (i >= 3) return i == 3 ? lightLabel(0) : label(lightButtons, i - 3);
                 return tabs()[i] + Ui.tr(", aba ", ", tab ")
                         + (i + 1) + Ui.tr(" de 3", " of 3");
             case Z_CARDS:
@@ -3104,11 +3184,11 @@ final class HomeView extends ViewGroup
                 fill.setColor(Ui.alpha(0xFFFFFFFF, f));
                 c.drawCircle(cell.centerX(), cell.centerY(), rad, fill);
             }
-            Symbols.draw(getContext(), c, lightButtons.get(i).symbol,
+           Symbols.draw(getContext(), c, lightSymbol(i),
                     cell.centerX(), cell.centerY(), 27 * k * s,
                     blend(tone(L_INK, 0xEBFFFFFF), L_INK, f));
             if (f > 0.01f) {
-                String label = lightButtons.get(i).label;
+                String label = lightLabel(i);
                 float half = lTip.measureText(label) / 2;
                 float x = Math.min(r.centerX(), CONTENT_R * k - half);
                 lTip.setAlpha(Math.round(255 * f));
