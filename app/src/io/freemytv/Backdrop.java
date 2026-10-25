@@ -169,7 +169,32 @@ final class Backdrop {
         if (b != full && b != out) b.recycle();
         return gpu(out);
     }
-
+    /**
+     * Page 3: just the backgrounds (frosted and glass, by day and at night) made from a card's image, without the
+     * wide and tall cards. Works at twice the glass size (960×540) and does NOT recycle src: it still belongs to the
+     * caller. Call it from a background thread.
+     */
+    static Backdrop background(Bitmap src) {
+        int w = GW * 2, h = GH * 2;
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        try {
+            Canvas c = new Canvas(out);
+            c.drawColor(0xFF1C1C1E);
+            Paint photo = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+            float scale = Math.max((float) w / src.getWidth(), (float) h / src.getHeight());
+            float sw = src.getWidth() * scale, sh = src.getHeight() * scale;
+            c.drawBitmap(src, null, new RectF((w - sw) / 2, (h - sh) / 2, (w + sw) / 2, (h + sh) / 2), photo);
+            int[] frost = reduce(out, FW, FH, 3, 3);
+            int[] light = whiten(frost.clone(), 0.82f);
+            int[] glass = reduce(out, GW, GH, 2, 2);
+            int[] lightGlass = whiten(glass.clone(), 0.74f);
+            int[] night = darken(frost.clone(), 0.76f);
+            int[] nightGlass = darken(glass, 0.56f);
+            return new Backdrop(null, frost, null, null, null, light, lightGlass, night, nightGlass);
+        } finally {
+            out.recycle();
+        }
+    }
     /** Copies it to GPU memory (cheap to draw; the process doesn't keep the pixels). */
     static Bitmap gpu(Bitmap b) {
         Bitmap g = b.copy(Bitmap.Config.HARDWARE, false);
